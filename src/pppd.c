@@ -12,15 +12,10 @@
 #include 				<rte_cycles.h>
 #include 				<rte_lcore.h>
 #include 				<rte_timer.h>
-#include 				<rte_ethdev.h>
 #include 				<rte_ether.h>
-#include 				<linux/ethtool.h>
-
 #include				<rte_memcpy.h>
-#include 				<rte_flow.h>
 #include				"fsm.h"
 #include 				"dpdk_send_recv.h"
-#include 				"flow_rules.h"
 
 #define 				RING_SIZE 		16384
 #define 				NUM_MBUFS 		8191
@@ -37,21 +32,17 @@ U8 						PORT_BIT_MAP(tPPP_PORT ports[]);
 tPPP_PORT				ppp_ports[USER]; //port is 1's based
 
 struct rte_mempool 		*mbuf_pool;
-struct rte_ring 		*rte_ring,*decap;
+struct rte_ring 		*rte_ring;
 
 extern int 				timer_loop(__attribute__((unused)) void *arg);
-extern int 				rte_ethtool_get_drvinfo(uint16_t port_id, struct ethtool_drvinfo *drvinfo);
-extern STATUS			PPP_FSM(struct rte_timer *ppp, tPPP_PORT *port_ccb, U16 event);
 
 unsigned char 			*wan_mac;
-struct rte_flow 		*flow;
 BOOL					data_plane_start;
 
 int main(int argc, char **argv)
 {
-	uint16_t 				portid;
-	uint16_t 				user_id_length, passwd_length;
-	struct ethtool_drvinfo 	info;
+	uint16_t portid;
+	uint16_t user_id_length, passwd_length;
 	
 	if (argc < 7) {
 		puts("Too less parameter.");
@@ -65,10 +56,12 @@ int main(int argc, char **argv)
 
 	if (rte_lcore_count() < 5)
 		rte_exit(EXIT_FAILURE, "We need at least 5 cores.\n");
-	if (rte_eth_dev_count_avail() < 2)
-		rte_exit(EXIT_FAILURE, "We need at least 2 eth ports.\n");
 
-	/* init users and ports info */
+	/*src_mac = rte_malloc("src mac",ETH_ALEN,RTE_CACHE_LINE_SIZE);
+	dst_mac = rte_malloc("dst mac",ETH_ALEN,RTE_CACHE_LINE_SIZE);
+	if (src_mac == NULL || dst_mac == NULL)
+		rte_panic("Out of memory\n");*/
+	wan_mac = (unsigned char *)malloc(ETH_ALEN);
 	for(int i=0; i<USER; i++) {
 		user_id_length = strlen(argv[1]);
 		passwd_length = strlen(argv[2]);
@@ -81,7 +74,6 @@ int main(int argc, char **argv)
 		ppp_ports[i].passwd[passwd_length] = '\0';
 	}
 	
-	wan_mac = (unsigned char *)malloc(ETH_ALEN);
 	rte_eth_macaddr_get(1,(struct ether_addr *)wan_mac);
 
 	/* Creates a new mempool in memory to hold the mbufs. */
@@ -91,18 +83,9 @@ int main(int argc, char **argv)
 	if (mbuf_pool == NULL)
 		rte_exit(EXIT_FAILURE, "Cannot create mbuf pool\n");
 	rte_ring = rte_ring_create("state_machine",RING_SIZE,rte_socket_id(),0);
-	decap = rte_ring_create("decapsulation",RING_SIZE,rte_socket_id(),0);
 
 	/* Initialize all ports. */
 	RTE_ETH_FOREACH_DEV(portid) {
-		memset(&info, 0, sizeof(info));
-		if (rte_ethtool_get_drvinfo(portid, &info)) {
-			printf("Error getting info for port %i\n", portid);
-			return -1;
-		}
-		printf("Port %i driver: %s (ver: %s)\n", portid, info.driver, info.version);
-		printf("firmware-version: %s\n", info.fw_version);
-		printf("bus-info: %s\n", info.bus_info);
 		if (PPP_PORT_INIT(portid) != 0)
 			rte_exit(EXIT_FAILURE, "Cannot init port %"PRIu8 "\n",portid);
 	}
@@ -117,14 +100,14 @@ int main(int argc, char **argv)
 	for(int i=0; i<USER; i++) {
 		rte_timer_init(&(ppp_ports[i].pppoe));
 		rte_timer_init(&(ppp_ports[i].ppp));
-		rte_timer_init(&(ppp_ports[i].nat));
 	}
 
 	rte_eal_remote_launch((lcore_function_t *)ppp_recvd,NULL,1);
-	rte_eal_remote_launch((lcore_function_t *)decapsulation,NULL,2);
-	rte_eal_remote_launch((lcore_function_t *)timer_loop,NULL,3);
-	rte_eal_remote_launch((lcore_function_t *)gateway,NULL,4);
-	control_plane();
+	rte_eal_remote_launch((lcore_function_t *)encapsulation,NULL,2);
+	rte_eal_remote_launch((lcore_function_t *)control_plane,NULL,3);
+	rte_eal_remote_launch((lcore_function_t *)timer_loop,NULL,4);
+	//rte_eal_remote_launch(gateway,NULL,5);
+
 	rte_eal_mp_wait_lcore();
     return 0;
 }
@@ -189,6 +172,7 @@ int pppdInit(void)
  ***************************************************************/
 int ppp_init(void)
 {
+	extern STATUS		PPP_FSM(struct rte_timer *ppp, tPPP_PORT *port_ccb, U16 event);
 	tPPP_MBX			*mail[BURST_SIZE];
 	int 				cp;
 	uint16_t			event;
@@ -200,9 +184,9 @@ int ppp_init(void)
 	ppp_lcp_header_t	ppp_lcp;
 	ppp_lcp_options_t	*ppp_lcp_options = (ppp_lcp_options_t *)malloc(40*sizeof(char));
 	
-	ppp_ports[0].phase = PPPOE_PHASE;
     if (build_padi(&(ppp_ports[0].pppoe),&(ppp_ports[0]),&max_retransmit) == FALSE)
     	goto out;
+	ppp_ports[0].phase = PPPOE_PHASE;
     rte_timer_reset(&(ppp_ports[0].pppoe),rte_get_timer_hz(),PERIODICAL,4,(rte_timer_cb_t)build_padi,&max_retransmit);
 	for(;;){
 	    burst_size = control_plane_dequeue(mail);

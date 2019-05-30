@@ -2,8 +2,6 @@
 #include 	"dpdk_header.h"
 #include 	<inttypes.h>
 
-STATUS 			PPP_FSM(struct rte_timer *ppp, tPPP_PORT *port_ccb, U16 event);
-
 static STATUS   A_this_layer_start(__attribute__((unused)) struct rte_timer *tim, __attribute__((unused)) tPPP_PORT *port_ccb);
 static STATUS   A_send_config_request(__attribute__((unused)) struct rte_timer *tim, __attribute__((unused)) tPPP_PORT *port_ccb);
 static STATUS   A_this_layer_finish(__attribute__((unused)) struct rte_timer *tim, __attribute__((unused)) tPPP_PORT *port_ccb);
@@ -21,9 +19,6 @@ static STATUS   A_init_restart_config(__attribute__((unused)) struct rte_timer *
 static STATUS   A_init_restart_termin(__attribute__((unused)) struct rte_timer *tim, __attribute__((unused)) tPPP_PORT *port_ccb);
 static STATUS   A_send_echo_reply(__attribute__((unused)) struct rte_timer *tim, __attribute__((unused)) tPPP_PORT *port_ccb);
 static STATUS   A_zero_restart_count(__attribute__((unused)) struct rte_timer *tim, __attribute__((unused)) tPPP_PORT *port_ccb);
-
-extern struct rte_flow *generate_lan_flow(uint16_t port_id, uint16_t rx_q_udp, uint16_t rx_q_tcp, struct rte_flow_error *error);
-extern struct rte_flow *generate_wan_flow(uint16_t port_id, uint16_t rx_q_udp, uint16_t rx_q_tcp, struct rte_flow_error *error);
 
 tPPP_STATE_TBL  ppp_fsm_tbl[2][121] = { 
 /*//////////////////////////////////////////////////////////////////////////////////
@@ -305,7 +300,7 @@ tPPP_STATE_TBL  ppp_fsm_tbl[2][121] = {
 
 { S_OPENED, 		E_RECV_ECHO_REPLY_REQUEST_DISCARD_REQUEST,		S_OPENED,			{ A_send_echo_reply, 0 }},
 
-{ S_INVLD, 0, 0, {0}}},
+{ S_INVLD, 0 }},
 
 {{ S_INIT,		  	E_UP,     							    		S_CLOSED,		    { 0 }},
 
@@ -383,9 +378,9 @@ tPPP_STATE_TBL  ppp_fsm_tbl[2][121] = {
 { S_STOPPED,		E_RECV_ECHO_REPLY_REQUEST_DISCARD_REQUEST, 		S_STOPPED,			{ 0 }},
 
 /*---------------------------------------------------------------------------*/
-{ S_CLOSING, 		E_DOWN,								     		S_INIT,			    { 0 }},
+{ S_CLOSING, 	E_DOWN,								     S_INIT,			      { 0 }},
 
-{ S_CLOSING, 		E_OPEN,								     		S_STOPPING,		    { A_create_down_event, A_create_up_event, 0 }},
+{ S_CLOSING, 	E_OPEN,								     S_STOPPING,		    { A_create_down_event, A_create_up_event, 0 }},
 
 { S_CLOSING, 	E_CLOSE,							     S_CLOSING,		      { 0 }},
 
@@ -583,7 +578,7 @@ tPPP_STATE_TBL  ppp_fsm_tbl[2][121] = {
 
 { S_OPENED, 	E_RECV_ECHO_REPLY_REQUEST_DISCARD_REQUEST, S_OPENED,{ A_send_echo_reply, 0 }},
 
-{ S_INVLD, 0, 0, {0}}}
+{ S_INVLD, 0 }}
 };
 
 /***********************************************************************
@@ -600,17 +595,19 @@ STATUS PPP_FSM(struct rte_timer *ppp, tPPP_PORT *port_ccb, U16 event)
     register int  	i,j;
     int			    retval;
 
-    if (!port_ccb)
+    if (!port_ccb) {
         return FALSE;
-
+    }
+    
     /* Find a matched state */
     for(i=0; ppp_fsm_tbl[port_ccb->cp][i].state!=S_INVLD; i++)
         if (ppp_fsm_tbl[port_ccb->cp][i].state == port_ccb->ppp_phase[port_ccb->cp].state)
             break;
     printf("cur state = %x, control protocol = %d\n", ppp_fsm_tbl[port_ccb->cp][i].state, port_ccb->cp);
 
-    if (ppp_fsm_tbl[port_ccb->cp][i].state == S_INVLD)
+    if (ppp_fsm_tbl[port_ccb->cp][i].state == S_INVLD) {
         return FALSE;
+    }
 
     /*
      * Find a matched event in a specific state.
@@ -620,12 +617,14 @@ STATUS PPP_FSM(struct rte_timer *ppp, tPPP_PORT *port_ccb, U16 event)
         if (ppp_fsm_tbl[port_ccb->cp][i].event == event)
             break;
     
-    if (ppp_fsm_tbl[port_ccb->cp][i].state != port_ccb->ppp_phase[port_ccb->cp].state)/* search until meet the next state */
+    if (ppp_fsm_tbl[port_ccb->cp][i].state != port_ccb->ppp_phase[port_ccb->cp].state) { /* search until meet the next state */
   		return TRUE; /* still pass to endpoint */
+    }
     
     /* Correct state found */
-    if (port_ccb->ppp_phase[port_ccb->cp].state != ppp_fsm_tbl[port_ccb->cp][i].next_state)
+    if (port_ccb->ppp_phase[port_ccb->cp].state != ppp_fsm_tbl[port_ccb->cp][i].next_state) {
         port_ccb->ppp_phase[port_ccb->cp].state = ppp_fsm_tbl[port_ccb->cp][i].next_state;
+    }
     
     for(j=0; ppp_fsm_tbl[port_ccb->cp][i].hdl[j]; j++) {
     	port_ccb->ppp_phase[port_ccb->cp].timer_counter = 10;
@@ -661,16 +660,13 @@ STATUS A_this_layer_up(__attribute__((unused)) struct rte_timer *tim, __attribut
     	if (build_auth_request_pap(buffer,port_ccb,&mulen) < 0)
     		return FALSE;
     	drv_xmit(buffer,mulen);
-    	puts("LCP connection establish successfully.");
-    	puts("Starting Authenticate.");
     }
     else if (port_ccb->ppp_phase[port_ccb->cp].ppp_payload->ppp_protocol == htons(IPCP_PROTOCOL)) {
     	data_plane_start = TRUE;
-    	rte_timer_reset(&(port_ccb->nat),rte_get_timer_hz(),PERIODICAL,0,(rte_timer_cb_t)nat_rule_timer,NULL);
-    	puts("IPCP connection establish successfully.");
     	printf("Now we can start to send data via pppoe session id 0x%x.\n", htons(port_ccb->session_id));
-    	printf("Our PPPoE client IP address is %" PRIu8 ".%" PRIu8 ".%" PRIu8 ".%" PRIu8 ", PPPoE server IP address is %" PRIu8 ".%" PRIu8 ".%" PRIu8 ".%" PRIu8 "\n", *(((uint8_t *)&(port_ccb->ipv4))), *(((uint8_t *)&(port_ccb->ipv4))+1), *(((uint8_t *)&(port_ccb->ipv4))+2), *(((uint8_t *)&(port_ccb->ipv4))+3), *(((uint8_t *)&(port_ccb->ipv4_gw))), *(((uint8_t *)&(port_ccb->ipv4_gw))+1), *(((uint8_t *)&(port_ccb->ipv4_gw))+2), *(((uint8_t *)&(port_ccb->ipv4_gw))+3));
+    	printf("Our IP address is %" PRIu8 ".%" PRIu8 ".%" PRIu8 ".%" PRIu8 ", gateway IP address is %" PRIu8 ".%" PRIu8 ".%" PRIu8 ".%" PRIu8 ".\n", *(((uint8_t *)&(port_ccb->ipv4))), *(((uint8_t *)&(port_ccb->ipv4))+1), *(((uint8_t *)&(port_ccb->ipv4))+2), *(((uint8_t *)&(port_ccb->ipv4))+3), *(((uint8_t *)&(port_ccb->ipv4_gw))), *(((uint8_t *)&(port_ccb->ipv4_gw))+1), *(((uint8_t *)&(port_ccb->ipv4_gw))+2), *(((uint8_t *)&(port_ccb->ipv4_gw))+3));
     }
+    printf("this layer up\n");
 
     return TRUE;
 }
@@ -694,7 +690,7 @@ STATUS A_init_restart_config(__attribute__((unused)) struct rte_timer *tim, __at
     printf("init config req timer start\n");
     rte_timer_stop(tim);
     port_ccb->ppp_phase[port_ccb->cp].timer_counter = 9;
-	rte_timer_reset(tim,3*rte_get_timer_hz(),PERIODICAL,3,(rte_timer_cb_t)A_send_config_request,port_ccb);
+	rte_timer_reset(tim,3*rte_get_timer_hz(),PERIODICAL,4,(rte_timer_cb_t)A_send_config_request,port_ccb);
 
     return TRUE;
 }
@@ -704,7 +700,7 @@ STATUS A_init_restart_termin(__attribute__((unused)) struct rte_timer *tim, __at
     printf("init termin req timer start\n");
     rte_timer_stop(tim);
     port_ccb->ppp_phase[port_ccb->cp].timer_counter = 9;
-	rte_timer_reset(tim,3*rte_get_timer_hz(),PERIODICAL,3,(rte_timer_cb_t)A_send_terminate_request,port_ccb);
+	rte_timer_reset(tim,3*rte_get_timer_hz(),PERIODICAL,4,(rte_timer_cb_t)A_send_terminate_request,port_ccb);
 
     return TRUE;
 }

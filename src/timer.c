@@ -18,6 +18,8 @@ int timer_loop(__attribute__((unused)) void *arg);
 
 #define TIMER_RESOLUTION_CYCLES 20000000ULL /* around 10ms at 2 Ghz */
 
+extern struct rte_timer		pppoe;
+
 __attribute__((noreturn)) int timer_loop(__attribute__((unused)) void *arg)
 {
 	uint64_t prev_tsc = 0, cur_tsc, diff_tsc;

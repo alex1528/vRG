@@ -4,8 +4,8 @@
   Designed by THE on Jan 14, 2019
 /\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\*/
 
-#ifndef _CODEC_H_
-#define _CODEC_H_
+#ifndef _PPP_CODEC_H_
+#define _PPP_CODEC_H_
 
 #include "pppoeclient.h"
 #include <ip_codec.h>
@@ -66,16 +66,17 @@ typedef enum {
 extern STATUS PPP_decode_frame(tPPP_MBX *mail, struct ethhdr *eth_hdr, pppoe_header_t *pppoe_header, ppp_payload_t *ppp_payload, ppp_lcp_header_t *ppp_lcp, ppp_lcp_options_t *ppp_lcp_options, uint16_t *event, struct rte_timer *tim, tPPP_PORT *port_ccb);
 extern STATUS decode_ipcp(struct ethhdr *eth_hdr, pppoe_header_t *pppoe_header, ppp_payload_t *ppp_payload, ppp_lcp_header_t *ppp_lcp, ppp_lcp_options_t *ppp_lcp_options, uint16_t total_lcp_length, uint16_t *event, struct rte_timer *tim, tPPP_PORT *port_ccb);
 
+//extern  void 	PRINT_PPP_MSG(tPPP_MSG *msg);
 extern void   DECODE_OBJID(U8 *vp, U8 vlen, U32 *oids, U8 *oids_len);
 
-extern STATUS build_config_request(unsigned char *buffer, tPPP_PORT *port_ccb, uint16_t *mulen);
-extern STATUS build_config_ack(unsigned char *buffer, tPPP_PORT *port_ccb, uint16_t *mulen);
-extern STATUS build_config_nak_rej(unsigned char *buffer, tPPP_PORT *port_ccb, uint16_t *mulen);
-extern STATUS build_terminate_ack(unsigned char *buffer, tPPP_PORT *port_ccb, uint16_t *mulen);
-extern STATUS build_code_reject(unsigned char *buffer, tPPP_PORT *port_ccb, uint16_t *mulen);
-extern STATUS build_terminate_request(unsigned char *buffer, tPPP_PORT *port_ccb, uint16_t *mulen);
-extern STATUS build_echo_reply(unsigned char *buffer, tPPP_PORT *port_ccb, uint16_t *mulen);
-extern STATUS build_auth_request_pap(unsigned char *buffer, tPPP_PORT *port_ccb, uint16_t *mulen);
+extern STATUS build_config_request(unsigned char* buffer, tPPP_PORT *port_ccb, uint16_t *mulen);
+extern STATUS build_config_ack(unsigned char* buffer, tPPP_PORT *port_ccb, uint16_t *mulen);
+extern STATUS build_config_nak_rej(unsigned char* buffer, tPPP_PORT *port_ccb, uint16_t *mulen);
+extern STATUS build_terminate_ack(unsigned char* buffer, tPPP_PORT *port_ccb, uint16_t *mulen);
+extern STATUS build_code_reject(unsigned char* buffer, tPPP_PORT *port_ccb, uint16_t *mulen);
+extern STATUS build_terminate_request(unsigned char* buffer, tPPP_PORT *port_ccb, uint16_t *mulen);
+extern STATUS build_echo_reply(unsigned char* buffer, tPPP_PORT *port_ccb, uint16_t *mulen);
+extern STATUS build_auth_request_pap(unsigned char* buffer, tPPP_PORT *port_ccb, uint16_t *mulen);
 extern STATUS build_auth_ack_pap(unsigned char *buffer, tPPP_PORT *port_ccb, uint16_t *mulen);
 
 STATUS check_nak_reject(uint8_t flag,struct ethhdr *eth_hdr, pppoe_header_t *pppoe_header, ppp_payload_t *ppp_payload, ppp_lcp_header_t *ppp_lcp, ppp_lcp_options_t *ppp_lcp_options, uint16_t total_lcp_length);

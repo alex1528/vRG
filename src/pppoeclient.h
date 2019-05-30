@@ -67,4 +67,11 @@
 #define MAX_RECV			1492
 #define MAX_RETRAN			10
 
+int lcp_nego(unsigned char if_name[], unsigned char *buffer);
+int raw_sock_send(char if_name[], uint8_t code, unsigned char *buffer);
+pppoe_header_t* create_padi(struct ethhdr *eth_hdr);
+int raw_sock_receive(char if_name[], uint8_t code, unsigned char *buffer);
+pppoe_header_t* create_padr(struct ethhdr *eth_hdr, unsigned char *tmp_buf);
+pppoe_header_t* create_padt(struct ethhdr *eth_hdr);
+
 extern uint8_t data_plane_start;

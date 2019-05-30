@@ -7,7 +7,6 @@
 /\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\*/
 #include <common.h>
 #include <rte_timer.h>
-#include <rte_memory.h>
 
 #define ETH_MTU					1500
 #define TEST_PORT_ID			1
@@ -151,19 +150,9 @@ typedef struct {
 
 	struct rte_timer 	pppoe;
 	struct rte_timer 	ppp;
-	struct rte_timer 	nat;
-}__rte_cache_aligned tPPP_PORT;
+} tPPP_PORT;
 
-typedef struct addr_table {
-	unsigned char 	mac_addr[6];
-	uint32_t		src_ip;
-	uint32_t		dst_ip;
-	uint16_t		port_id;
-	uint32_t		shift;
-	int8_t 			is_fill;
-	uint8_t			is_alive;
-}__rte_cache_aligned addr_table_t;
-
+extern U8	 			g_loc_mac[]; //system mac addr -- global variable
 extern tPPP_PORT		ppp_ports[USER];
 extern U32				ppp_interval;
 extern U8				ppp_max_msg_per_query;

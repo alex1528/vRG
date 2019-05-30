@@ -11,13 +11,14 @@
  * output: imsg, event
  * return: session ccb
  *****************************************************/
-STATUS PPP_decode_frame(tPPP_MBX *mail, struct ethhdr *eth_hdr, pppoe_header_t *pppoe_header, ppp_payload_t *ppp_payload, ppp_lcp_header_t *ppp_lcp, ppp_lcp_options_t *ppp_lcp_options, uint16_t *event, struct rte_timer *tim, tPPP_PORT *port_ccb)
+STATUS PPP_decode_frame(tPPP_MBX *mail, /*tPPP_MSG *imsg, */struct ethhdr *eth_hdr, pppoe_header_t *pppoe_header, ppp_payload_t *ppp_payload, ppp_lcp_header_t *ppp_lcp, ppp_lcp_options_t *ppp_lcp_options, uint16_t *event, struct rte_timer *tim, tPPP_PORT *port_ccb)
 {
     uint16_t	mulen;
 	//uint8_t		*mu;
 
-	if (mail->len > ETH_MTU)
+	if (mail->len > ETH_MTU){
 	    return ERROR;
+	}
 
 	struct ethhdr *tmp_eth_hdr = (struct ethhdr *)mail->refp;
 	pppoe_header_t *tmp_pppoe_header = (pppoe_header_t *)(tmp_eth_hdr + 1);
@@ -193,9 +194,6 @@ STATUS PPP_decode_frame(tPPP_MBX *mail, struct ethhdr *eth_hdr, pppoe_header_t *
 		puts("unknown PPP protocol");
 		return FALSE;
 	}
-
-	/*----------- ppp -------------*/
-	//PRINT_ppp_MSG(imsg);
 	
 	return TRUE;
 }
@@ -657,15 +655,13 @@ STATUS build_terminate_ack(unsigned char* buffer, tPPP_PORT *port_ccb, uint16_t 
 
 STATUS build_terminate_request(unsigned char* buffer, tPPP_PORT *port_ccb, uint16_t *mulen)
 {
-	unsigned char 			tmp_mac[6];
 	struct ethhdr 			*eth_hdr = port_ccb->ppp_phase[port_ccb->cp].eth_hdr;
 	pppoe_header_t 			*pppoe_header = port_ccb->ppp_phase[port_ccb->cp].pppoe_header;
 	ppp_payload_t 			*ppp_payload = port_ccb->ppp_phase[port_ccb->cp].ppp_payload;
 	ppp_lcp_header_t 		*ppp_lcp = port_ccb->ppp_phase[port_ccb->cp].ppp_lcp;
 
-	rte_memcpy(tmp_mac,eth_hdr->h_source,6);
-	rte_memcpy(eth_hdr->h_source,eth_hdr->h_dest,6);
-	rte_memcpy(eth_hdr->h_dest,tmp_mac,6);
+	rte_memcpy(eth_hdr->h_dest,port_ccb->src_mac,6);
+	rte_memcpy(eth_hdr->h_source,port_ccb->dst_mac,6);
 	eth_hdr->h_proto = htons(ETH_P_PPP_SES);
 
 	/* build ppp protocol and lcp header. */
@@ -707,8 +703,8 @@ STATUS build_code_reject(__attribute__((unused)) unsigned char* buffer, __attrib
 STATUS build_auth_request_pap(unsigned char* buffer, tPPP_PORT *port_ccb, uint16_t *mulen)
 {
 	ppp_lcp_header_t 		ppp_pap_header;
-	uint8_t 				peer_id_length = strlen((const char *)(port_ccb->user_id));
-	uint8_t 				peer_passwd_length = strlen((const char *)(port_ccb->passwd));
+	uint8_t 				peer_id_length = strlen(port_ccb->user_id);
+	uint8_t 				peer_passwd_length = strlen(port_ccb->passwd);
 	struct ethhdr 			*eth_hdr = port_ccb->ppp_phase[port_ccb->cp].eth_hdr;
 	pppoe_header_t 			*pppoe_header = port_ccb->ppp_phase[port_ccb->cp].pppoe_header;
 	ppp_payload_t 			*ppp_payload = port_ccb->ppp_phase[port_ccb->cp].ppp_payload;
@@ -747,17 +743,15 @@ STATUS build_auth_request_pap(unsigned char* buffer, tPPP_PORT *port_ccb, uint16
 STATUS build_auth_ack_pap(unsigned char *buffer, tPPP_PORT *port_ccb, uint16_t *mulen)
 {
 	ppp_lcp_header_t 		ppp_pap_header;
-	const char 				*login_msg = "Login ok";
+	char 					*login_msg = "Login ok";
 	ppp_pap_ack_nak_t 		ppp_pap_ack_nak;
-	unsigned char 			tmp_mac[6];
 	struct ethhdr 			*eth_hdr = port_ccb->ppp_phase[port_ccb->cp].eth_hdr;
 	pppoe_header_t 			*pppoe_header = port_ccb->ppp_phase[port_ccb->cp].pppoe_header;
 	ppp_payload_t 			*ppp_payload = port_ccb->ppp_phase[port_ccb->cp].ppp_payload;
 	ppp_lcp_header_t 		*ppp_lcp = port_ccb->ppp_phase[port_ccb->cp].ppp_lcp;
 
-	rte_memcpy(tmp_mac,eth_hdr->h_source,6);
-	rte_memcpy(eth_hdr->h_source,eth_hdr->h_dest,6);
-	rte_memcpy(eth_hdr->h_dest,tmp_mac,6);
+	rte_memcpy(eth_hdr->h_source,port_ccb->src_mac,6);
+	rte_memcpy(eth_hdr->h_dest,port_ccb->dst_mac,6);
 
 	ppp_payload->ppp_protocol = htons(AUTH_PROTOCOL);
 	ppp_pap_header.code = AUTH_ACK;
@@ -766,7 +760,7 @@ STATUS build_auth_ack_pap(unsigned char *buffer, tPPP_PORT *port_ccb, uint16_t *
 	ppp_pap_ack_nak.msg_length = strlen(login_msg);
 	rte_memcpy(ppp_pap_ack_nak.msg,login_msg,ppp_pap_ack_nak.msg_length);
 
-	ppp_pap_header.length = sizeof(ppp_lcp_header_t) + ppp_pap_ack_nak.msg_length + sizeof(ppp_pap_ack_nak.msg_length);
+	ppp_pap_header.length = sizeof(ppp_lcp_header_t);
 	pppoe_header->length = ppp_pap_header.length + sizeof(ppp_payload_t);
 	ppp_pap_header.length = htons(ppp_pap_header.length);
 	pppoe_header->length = htons(pppoe_header->length);
