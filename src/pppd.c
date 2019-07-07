@@ -172,7 +172,7 @@ void PPP_ter(void)
 {
 	tPPP_MBX *mail = (tPPP_MBX *)malloc(sizeof(tPPP_MBX));
 
-    mail->type = CLI_QUIT;
+    mail->refp[0] = CLI_QUIT;
 	
 	mail->type = IPC_EV_TYPE_CLI;
 	mail->len = 1;
