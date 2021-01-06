@@ -115,7 +115,7 @@ int main(int argc, char **argv)
 			}
 			rte_eth_macaddr_get(0,(struct rte_ether_addr *)ppp_ports[user_id].lan_mac);
 			user_id_length = strlen(user_name);
-			passwd_length = strlen(passwd) - 1;
+			passwd_length = strlen(passwd);
 			ppp_ports[user_id].user_id = (unsigned char *)rte_malloc(NULL,user_id_length+1,0);
 			ppp_ports[user_id].passwd = (unsigned char *)rte_malloc(NULL,passwd_length+1,0);
 			rte_memcpy(ppp_ports[user_id].user_id,user_name,user_id_length);
@@ -181,6 +181,10 @@ int main(int argc, char **argv)
 		ppp_ports[i].data_plane_start = FALSE;
 	}
 	rte_atomic16_init(&cp_recv_cums);
+#ifdef RTE_LIBRTE_PDUMP
+	/* initialize packet capture framework */
+	rte_pdump_init(NULL);
+#endif
 	rte_eal_remote_launch((lcore_function_t *)ppp_recvd,NULL,1);
 	rte_eal_remote_launch((lcore_function_t *)decapsulation_tcp,NULL,2);
 	rte_eal_remote_launch((lcore_function_t *)decapsulation_udp,NULL,3);
@@ -240,6 +244,10 @@ void PPP_bye(tPPP_PORT *port_ccb)
 			rte_ring_free(encap_udp);
             fclose(fp);
 			cmdline_stdin_exit(cl);
+			#ifdef RTE_LIBRTE_PDUMP
+			/*uninitialize packet capture framework */
+			rte_pdump_uninit();
+			#endif
 			exit(0);
     		break;
     	case LCP_PHASE:
@@ -290,7 +298,6 @@ int pppdInit(void)
 		ppp_ports[i].ppp_phase[1].state = S_INIT;
 		ppp_ports[i].pppoe_phase.active = FALSE;
 		ppp_ports[i].user_num = i;
-		ppp_ports[i].vlan = i + 2;
 		
 		ppp_ports[i].ipv4 = 0;
 		ppp_ports[i].ipv4_gw = 0;
@@ -320,7 +327,6 @@ int ppp_init(void)
 	uint16_t			burst_size;
 	uint16_t			recv_type;
 	struct rte_ether_hdr eth_hdr;
-	vlan_header_t		vlan_header;
 	pppoe_header_t 		pppoe_header;
 	ppp_payload_t		ppp_payload;
 	ppp_header_t		ppp_lcp;
@@ -345,46 +351,17 @@ int ppp_init(void)
 			case IPC_EV_TYPE_TMR:
 				break;
 			case IPC_EV_TYPE_DRV:
-#pragma GCC diagnostic push  // require GCC 4.6
-#pragma GCC diagnostic ignored "-Wstrict-aliasing"
-				session_index = ((vlan_header_t *)(((struct rte_ether_hdr *)mail[i]->refp) + 1))->tci_union.tci_value;
-				session_index = rte_be_to_cpu_16(session_index);
-				session_index = (session_index & 0xFFF) - 2;
-				if (session_index >= MAX_USER) {
-					#ifdef _DP_DBG
-					puts("Recv not our PPPoE packet.\nDiscard.");
-					#endif
+				if (PPP_decode_frame(mail[i],&eth_hdr,&pppoe_header,&ppp_payload,&ppp_lcp,ppp_options,&event,&(ppp_ports[session_index].ppp),&ppp_ports[session_index]) == FALSE)					
 					continue;
-				}
-#pragma GCC diagnostic pop   // require GCC 4.6
-				if (PPP_decode_frame(mail[i],&eth_hdr,&vlan_header,&pppoe_header,&ppp_payload,&ppp_lcp,ppp_options,&event,&(ppp_ports[session_index].ppp),&ppp_ports[session_index]) == FALSE)					
-					continue;
-				if (vlan_header.next_proto == rte_cpu_to_be_16(ETH_P_PPP_DIS)) {
+				if (eth_hdr.ether_type == rte_cpu_to_be_16(ETH_P_PPP_DIS)) {
 					switch(pppoe_header.code) {
 					case PADO:
-						/*for(session_index=0; session_index<MAX_USER; session_index++) {
-							int j;
-							for(j=0; j<ETH_ALEN; j++) {
-								if (ppp_ports[session_index].dst_mac[j] != 0)
-									break;
-							}
-							if (j == ETH_ALEN)
-								break;
-    					}
-    					if (session_index >= MAX_USER) {
-							RTE_LOG(INFO,EAL,"Too many pppoe users.\nDiscard.\n");
-							#ifdef _DP_DBG
-    						puts("Too many pppoe users.\nDiscard.");
-							#endif
-    						continue;
-    					}*/
 						if (ppp_ports[session_index].pppoe_phase.active == TRUE)
 							continue;
 						ppp_ports[session_index].pppoe_phase.active = TRUE;
     					ppp_ports[session_index].pppoe_phase.eth_hdr = &eth_hdr;
-						ppp_ports[session_index].pppoe_phase.vlan_header = &vlan_header;
 						ppp_ports[session_index].pppoe_phase.pppoe_header = &pppoe_header;
-						ppp_ports[session_index].pppoe_phase.pppoe_header_tag = (pppoe_header_tag_t *)((pppoe_header_t *)((vlan_header_t *)((struct rte_ether_hdr *)mail[i]->refp + 1) + 1) + 1);
+						ppp_ports[session_index].pppoe_phase.pppoe_header_tag = (pppoe_header_tag_t *)((pppoe_header_t *)((struct rte_ether_hdr *)mail[i]->refp + 1) + 1);
 						ppp_ports[session_index].pppoe_phase.max_retransmit = MAX_RETRAN;
 						ppp_ports[session_index].pppoe_phase.timer_counter = 0;
 						rte_timer_stop(&(ppp_ports[session_index].pppoe));
@@ -400,7 +377,6 @@ int ppp_init(void)
 						ppp_ports[session_index].cp = 0;
     					for (int i=0; i<2; i++) {
     						ppp_ports[session_index].ppp_phase[i].eth_hdr = &eth_hdr;
-							ppp_ports[session_index].ppp_phase[i].vlan_header = &vlan_header;
     						ppp_ports[session_index].ppp_phase[i].pppoe_header = &pppoe_header;
     						ppp_ports[session_index].ppp_phase[i].ppp_payload = &ppp_payload;
     						ppp_ports[session_index].ppp_phase[i].ppp_lcp = &ppp_lcp;
@@ -532,12 +508,16 @@ out:
 BOOL is_valid(char *token, char *next)
 {
 	for(uint i=0; i<strlen(token); i++)	{
-		if (*(token+i) < 0x30 || (*(token+i) > 0x39 && *(token+i) < 0x41) || (*(token+i) > 0x5B && *(token+i) < 0x60) || *(token+i) > 0x7B)
-			return FALSE;
+		if (*(token+i) < 0x30 || (*(token+i) > 0x39 && *(token+i) < 0x40) || (*(token+i) > 0x5B && *(token+i) < 0x60) || *(token+i) > 0x7B) {
+			if (*(token+i) != 0x2E)
+				return FALSE;
+		}
 	}
 	for(uint i=0; i<strlen(next)-1; i++)	{
-		if (*(next+i) < 0x30 || (*(next+i) > 0x39 && *(next+i) < 0x41) || (*(next+i) > 0x5B && *(next+i) < 0x60) || *(next+i) > 0x7B)
-			return FALSE;
+		if (*(next+i) < 0x30 || (*(next+i) > 0x39 && *(next+i) < 0x40) || (*(next+i) > 0x5B && *(next+i) < 0x60) || *(next+i) > 0x7B) {
+			if (*(token+i) != 0x2E)
+				return FALSE;
+		}
 	}
 	return TRUE;
 }

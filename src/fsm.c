@@ -1,927 +1,689 @@
-#include    "fsm.h"
-#include 	"dpdk_header.h"
-#include 	"dbg.h"
-#include 	<inttypes.h>
+#include <stdint.h>
+#include <inttypes.h>
+#include <rte_eal.h>
+#include <rte_ethdev.h>
+#include <rte_malloc.h>
+#include <rte_cycles.h>
+#include <rte_lcore.h>
+#include <rte_mbuf.h>
+#include <rte_ether.h>
+#include <rte_arp.h>
+#include <rte_ip.h>
+#include <rte_icmp.h>
+#include <rte_udp.h>
+#include <rte_tcp.h>
+#include <rte_timer.h>
+#include <pthread.h>
+#include <string.h>
+#include <stdio.h>
+#include <rte_memcpy.h>
+#include <rte_atomic.h>
+#include "pppoeclient.h"
+#include "util.h"
+#include "nat.h"
 
-STATUS 			PPP_FSM(struct rte_timer *ppp, tPPP_PORT *port_ccb, U16 event);
+#define RX_RING_SIZE 128
 
-static STATUS   A_this_layer_start(__attribute__((unused)) struct rte_timer *tim, __attribute__((unused)) tPPP_PORT *port_ccb);
-static STATUS   A_send_config_request(__attribute__((unused)) struct rte_timer *tim, __attribute__((unused)) tPPP_PORT *port_ccb);
-static STATUS   A_this_layer_finish(__attribute__((unused)) struct rte_timer *tim, __attribute__((unused)) tPPP_PORT *port_ccb);
-static STATUS   A_send_terminate_ack(__attribute__((unused)) struct rte_timer *tim, __attribute__((unused)) tPPP_PORT *port_ccb);
-static STATUS   A_send_code_reject(__attribute__((unused)) struct rte_timer *tim, __attribute__((unused)) tPPP_PORT *port_ccb);
-static STATUS   A_create_down_event(__attribute__((unused)) struct rte_timer *tim, __attribute__((unused)) tPPP_PORT *port_ccb);
-static STATUS   A_create_up_event(__attribute__((unused)) struct rte_timer *tim, __attribute__((unused)) tPPP_PORT *port_ccb);
-static STATUS   A_send_config_ack(__attribute__((unused)) struct rte_timer *tim, __attribute__((unused)) tPPP_PORT *port_ccb);
-static STATUS   A_send_config_nak_rej(__attribute__((unused)) struct rte_timer *tim, __attribute__((unused)) tPPP_PORT *port_ccb);
-static STATUS   A_send_terminate_request(__attribute__((unused)) struct rte_timer *tim, __attribute__((unused)) tPPP_PORT *port_ccb);
-static STATUS   A_this_layer_up(__attribute__((unused)) struct rte_timer *tim, __attribute__((unused)) tPPP_PORT *port_ccb);
-static STATUS   A_this_layer_down(__attribute__((unused)) struct rte_timer *tim, __attribute__((unused)) tPPP_PORT *port_ccb);
-static STATUS   A_init_restart_count(__attribute__((unused)) struct rte_timer *tim, __attribute__((unused)) tPPP_PORT *port_ccb);
-static STATUS   A_init_restart_config(__attribute__((unused)) struct rte_timer *tim, __attribute__((unused)) tPPP_PORT *port_ccb);
-static STATUS   A_init_restart_termin(__attribute__((unused)) struct rte_timer *tim, __attribute__((unused)) tPPP_PORT *port_ccb);
-static STATUS   A_send_echo_reply(__attribute__((unused)) struct rte_timer *tim, __attribute__((unused)) tPPP_PORT *port_ccb);
-static STATUS   A_zero_restart_count(__attribute__((unused)) struct rte_timer *tim, __attribute__((unused)) tPPP_PORT *port_ccb);
-static STATUS 	A_send_padt(__attribute__((unused)) struct rte_timer *tim, __attribute__((unused)) tPPP_PORT *port_ccb);
-static STATUS 	A_create_close_to_lower_layer(__attribute__((unused)) struct rte_timer *tim, __attribute__((unused)) tPPP_PORT *port_ccb);
+#define TX_RING_SIZE 512
+
+#define BURST_SIZE 32
 
 extern tPPP_PORT				ppp_ports[MAX_USER];
-extern BOOL                     prompt;
-//extern struct rte_flow *generate_lan_flow(uint16_t port_id, uint16_t rx_q_udp, uint16_t rx_q_tcp, struct rte_flow_error *error);
-//extern struct rte_flow *generate_wan_flow(uint16_t port_id, uint16_t rx_q_udp, uint16_t rx_q_tcp, struct rte_flow_error *error);
-
-tPPP_STATE_TBL  ppp_fsm_tbl[2][121] = { 
-/*//////////////////////////////////////////////////////////////////////////////////
-  	STATE   		EVENT           						      NEXT-STATE            HANDLER       
-///////////////////////////////////////////////////////////////////////////////////\*/
-{{ S_INIT,		  	E_UP,     							    	  	S_CLOSED,		    { 0 }},
-
-/* these actions are "this layer start" (tls) and should retern "UP" event */
-{ S_INIT,		  	E_OPEN,     						    		S_STARTING,		    { A_this_layer_start, 0 }},
-
-{ S_INIT, 			E_CLOSE,							      		S_INIT, 		    { 0 }},	                                                      	  
-
-/*---------------------------------------------------------------------------*/
-{ S_STARTING,		E_UP,     							    		S_REQUEST_SENT,	  	{ A_send_config_request, A_init_restart_config, 0 }},
-
-{ S_STARTING,		E_OPEN,    							    		S_STARTING,		    { 0 }},
-
-/* these actions are "this layer finish" (tlf) and should retern "DOWN" event */
-{ S_STARTING,		E_CLOSE,    						    		S_INIT,			    { A_this_layer_finish, 0 }},
-
-/*---------------------------------------------------------------------------*/
-{ S_CLOSED,			E_DOWN, 							      		S_INIT,			    { A_send_padt, 0 }},
-
-{ S_CLOSED,			E_OPEN, 							      		S_REQUEST_SENT,	  	{ A_send_config_request, A_init_restart_config, 0 }},
-
-{ S_CLOSED,			E_CLOSE, 							      		S_CLOSED,		    { 0 }},
-
-{ S_CLOSED,			E_RECV_GOOD_CONFIG_REQUEST, 					S_CLOSED,		    { A_send_terminate_ack, 0 }},
-
-{ S_CLOSED,			E_RECV_BAD_CONFIG_REQUEST, 						S_CLOSED,		    { A_send_terminate_ack, 0 }},
-
-{ S_CLOSED,			E_RECV_CONFIG_ACK, 								S_CLOSED,		    { A_send_terminate_ack, 0 }},
-
-{ S_CLOSED,			E_RECV_CONFIG_NAK_REJ, 							S_CLOSED,		    { A_send_terminate_ack, 0 }},
-
-{ S_CLOSED,			E_RECV_TERMINATE_REQUEST, 						S_CLOSED,		    { A_send_terminate_ack, 0 }},
-
-{ S_CLOSED,			E_RECV_TERMINATE_ACK, 							S_CLOSED,		    { 0 }},
-
-{ S_CLOSED,			E_RECV_UNKNOWN_CODE, 							S_CLOSED,		    { A_send_code_reject, 0 }},
-
-/* recv code/protocol reject when rejected value is acceptable, 
-	such as a Code-Reject of an extended code, 
-	or a Protocol-Reject of a NCP */ 
-{ S_CLOSED,			E_RECV_GOOD_CODE_PROTOCOL_REJECT, 				S_CLOSED,	  		{ 0 }},
-
-{ S_CLOSED,			E_RECV_BAD_CODE_PROTOCOL_REJECT, 				S_CLOSED,			{ A_this_layer_finish, 0 }},
-
-{ S_CLOSED,			E_RECV_ECHO_REPLY_REQUEST_DISCARD_REQUEST, 		S_CLOSED,			{ 0 }},
-
-/*---------------------------------------------------------------------------*/
-{ S_STOPPED,		E_DOWN,     						   			S_STARTING,		    { A_this_layer_start, 0 }},
-
-{ S_STOPPED,		E_OPEN,     						   			S_STOPPED,		    { A_create_down_event, A_create_up_event, 0 }},
-
-{ S_STOPPED,		E_CLOSE,     						   			S_CLOSED,		    { 0 }},
-
-{ S_STOPPED,		E_RECV_GOOD_CONFIG_REQUEST,						S_ACK_SENT,		    { A_init_restart_config, A_send_config_request, A_send_config_ack, 0 }},
-
-{ S_STOPPED,		E_RECV_BAD_CONFIG_REQUEST, 						S_REQUEST_SENT,	  	{ A_init_restart_config, A_send_config_request, A_send_config_nak_rej, 0 }},
-	
-{ S_STOPPED,		E_RECV_CONFIG_ACK, 				 				S_STOPPED,		    { A_send_terminate_ack, 0 }},
-
-{ S_STOPPED,		E_RECV_CONFIG_NAK_REJ, 		 					S_STOPPED,		    { A_send_terminate_ack, 0 }},
-
-{ S_STOPPED,		E_RECV_TERMINATE_REQUEST,  						S_STOPPED,		    { A_send_terminate_ack, 0 }},
-
-{ S_STOPPED,		E_RECV_TERMINATE_ACK, 		 					S_STOPPED,		    { 0 }},
-	
-{ S_STOPPED,		E_RECV_UNKNOWN_CODE, 			 				S_STOPPED,		    { A_send_code_reject, 0 }},
-
-/* recv code/protocol reject when rejected value is acceptable, 
-	such as a Code-Reject of an extended code, 
-	or a Protocol-Reject of a NCP */ 
-{ S_STOPPED,		E_RECV_GOOD_CODE_PROTOCOL_REJECT, 				S_STOPPED,			{ 0 }},
-
-{ S_STOPPED,		E_RECV_BAD_CODE_PROTOCOL_REJECT, 				S_STOPPED,			{ A_this_layer_finish, 0 }},
-
-{ S_STOPPED,		E_RECV_ECHO_REPLY_REQUEST_DISCARD_REQUEST, 		S_STOPPED,			{ 0 }},
-
-/*---------------------------------------------------------------------------*/
-{ S_CLOSING, 		E_DOWN,								     		S_INIT,			    { 0 }},
-
-{ S_CLOSING, 		E_OPEN,								     		S_STOPPING,		    { A_create_down_event, A_create_up_event, 0 }},
-
-{ S_CLOSING, 		E_CLOSE,							     		S_CLOSING,		    { 0 }},
-
-{ S_CLOSING, 		E_TIMEOUT_COUNTER_POSITIVE,						S_CLOSING,		    { A_send_terminate_request, 0 }},
-
-{ S_CLOSING, 		E_TIMEOUT_COUNTER_EXPIRED, 						S_CLOSED,		    { A_this_layer_finish, 0 }},
-
-{ S_CLOSING,		E_RECV_GOOD_CONFIG_REQUEST,						S_CLOSING,		    { 0 }},
-
-{ S_CLOSING,		E_RECV_BAD_CONFIG_REQUEST, 						S_CLOSING,		    { 0 }},
-
-{ S_CLOSING,		E_RECV_CONFIG_ACK, 								S_CLOSING,		    { 0 }},
-
-{ S_CLOSING,		E_RECV_CONFIG_NAK_REJ, 		 					S_CLOSING,		    { 0 }},
-
-{ S_CLOSING,		E_RECV_TERMINATE_REQUEST,  						S_CLOSING,		    { A_send_terminate_ack, 0 }},
-
-{ S_CLOSING,		E_RECV_TERMINATE_ACK, 		 					S_CLOSED,		    { A_create_down_event, A_create_up_event, 0 }},
-
-{ S_CLOSING,		E_RECV_UNKNOWN_CODE, 							S_CLOSING,		    { A_send_code_reject, 0 }},
-
-/* recv code/protocol reject when rejected value is acceptable, 
-	such as a Code-Reject of an extended code, 
-	or a Protocol-Reject of a NCP */ 
-{ S_CLOSING,		E_RECV_GOOD_CODE_PROTOCOL_REJECT, 				S_CLOSING,  		{ 0 }},
-
-{ S_CLOSING,		E_RECV_BAD_CODE_PROTOCOL_REJECT, 				S_CLOSED,			{ A_this_layer_finish, 0 }},
-
-{ S_CLOSING,		E_RECV_ECHO_REPLY_REQUEST_DISCARD_REQUEST, 		S_CLOSING,			{ 0 }},
-
-/*---------------------------------------------------------------------------*/
-{ S_STOPPING, 		E_DOWN,								     		S_STARTING, 	    { 0 }},
-
-{ S_STOPPING, 		E_OPEN,								     		S_STOPPING, 	    { A_create_down_event, A_create_up_event, 0 }},
-
-{ S_STOPPING, 		E_CLOSE,							     		S_CLOSING, 		    { 0 }},
-
-{ S_STOPPING, 		E_TIMEOUT_COUNTER_POSITIVE,						S_STOPPING,		    { A_send_terminate_request, 0 }},
-
-{ S_STOPPING, 		E_TIMEOUT_COUNTER_EXPIRED, 						S_STOPPED,		    { A_this_layer_finish, 0 }},
-
-{ S_STOPPING,		E_RECV_GOOD_CONFIG_REQUEST,     				S_STOPPING,			{ 0 }},
-
-{ S_STOPPING,		E_RECV_BAD_CONFIG_REQUEST,     					S_STOPPING,			{ 0 }},
-
-{ S_STOPPING,		E_RECV_CONFIG_ACK, 								S_STOPPING,			{ 0 }},
-
-{ S_STOPPING,		E_RECV_CONFIG_NAK_REJ, 							S_STOPPING,			{ 0 }},
-
-{ S_STOPPING,		E_RECV_TERMINATE_REQUEST, 						S_STOPPING,			{ A_send_terminate_ack, 0 }},
-
-{ S_STOPPING,		E_RECV_TERMINATE_ACK, 							S_STOPPED,			{ A_create_down_event, A_create_up_event, 0 }},
-
-{ S_STOPPING,		E_RECV_UNKNOWN_CODE, 							S_STOPPING,			{ A_send_code_reject, 0 }},
-
-/* recv code/protocol reject when rejected value is acceptable, 
-	such as a Code-Reject of an extended code, 
-	or a Protocol-Reject of a NCP */ 
-{ S_STOPPING,		E_RECV_GOOD_CODE_PROTOCOL_REJECT, 				S_STOPPING,			{ 0 }},
-
-{ S_STOPPING,		E_RECV_BAD_CODE_PROTOCOL_REJECT, 				S_STOPPED,			{ A_this_layer_finish, 0 }},
-
-{ S_STOPPING,		E_RECV_ECHO_REPLY_REQUEST_DISCARD_REQUEST, 		S_STOPPING,			{ 0 }},
-
-/*---------------------------------------------------------------------------*/
-{ S_REQUEST_SENT, 	E_DOWN,											S_STARTING, 		{ 0 }},
-
-{ S_REQUEST_SENT, 	E_OPEN,											S_REQUEST_SENT, 	{ 0 }},
-
-{ S_REQUEST_SENT, 	E_CLOSE,										S_CLOSING, 			{ A_init_restart_termin, A_send_terminate_request, 0 }},
-
-{ S_REQUEST_SENT, 	E_TIMEOUT_COUNTER_POSITIVE,						S_REQUEST_SENT, 	{ A_send_config_request, 0 }},
-
-/* may be with "PASSIVE" option, with this option, ppp will not exit but then just wait for a valid LCP packet from peer if there is not received form peer */
-{ S_REQUEST_SENT, 	E_TIMEOUT_COUNTER_EXPIRED,						S_STOPPED, 			{ A_this_layer_finish, 0 }},
-
-{ S_REQUEST_SENT, 	E_RECV_GOOD_CONFIG_REQUEST,						S_ACK_SENT,			{ A_send_config_ack, 0 }},
-
-{ S_REQUEST_SENT, 	E_RECV_BAD_CONFIG_REQUEST,						S_REQUEST_SENT,		{ A_send_config_nak_rej, 0 }},
-
-{ S_REQUEST_SENT, 	E_RECV_CONFIG_ACK,								S_ACK_RECEIVED,		{ A_init_restart_count, 0 }},
-
-{ S_REQUEST_SENT, 	E_RECV_CONFIG_NAK_REJ,							S_REQUEST_SENT,		{ A_init_restart_config, A_send_config_request, 0 }},
-
-{ S_REQUEST_SENT, 	E_RECV_TERMINATE_REQUEST,						S_REQUEST_SENT,		{ A_send_terminate_ack, 0 }},
-
-{ S_REQUEST_SENT, 	E_RECV_TERMINATE_ACK,							S_REQUEST_SENT,		{ 0 }},
-
-{ S_REQUEST_SENT, 	E_RECV_UNKNOWN_CODE,							S_REQUEST_SENT,		{ A_send_code_reject, 0 }},
-
-{ S_REQUEST_SENT, 	E_RECV_GOOD_CODE_PROTOCOL_REJECT,				S_REQUEST_SENT,		{ 0 }},
-
-{ S_REQUEST_SENT, 	E_RECV_BAD_CODE_PROTOCOL_REJECT,				S_STOPPED,			{ A_this_layer_finish, 0 }},
-
-{ S_REQUEST_SENT, 	E_RECV_ECHO_REPLY_REQUEST_DISCARD_REQUEST, 		S_REQUEST_SENT,		{ 0 }},
-
-/*---------------------------------------------------------------------------*/
-{ S_ACK_RECEIVED, 	E_DOWN,											S_STARTING, 		{ 0 }},
-
-{ S_ACK_RECEIVED, 	E_OPEN,											S_ACK_RECEIVED, 	{ 0 }},
-
-{ S_ACK_RECEIVED, 	E_CLOSE,										S_CLOSING, 			{ A_init_restart_termin, A_send_terminate_request, 0 }},
-
-{ S_ACK_RECEIVED, 	E_TIMEOUT_COUNTER_POSITIVE,						S_REQUEST_SENT, 	{ A_send_config_request, 0 }},
-
-/* may be with "PASSIVE" option, with this option, ppp will not exit but then just wait for a valid LCP packet from peer if there is not received from peer */
-{ S_ACK_RECEIVED, 	E_TIMEOUT_COUNTER_EXPIRED,						S_STOPPED, 			{ A_this_layer_finish, 0 }},
-
-{ S_ACK_RECEIVED, 	E_RECV_GOOD_CONFIG_REQUEST,						S_OPENED,			{ A_send_config_ack, A_this_layer_up, 0 }},
-
-{ S_ACK_RECEIVED, 	E_RECV_BAD_CONFIG_REQUEST,						S_ACK_RECEIVED,		{ A_send_config_nak_rej, 0 }},
-
-/* we should silently discard invalid ack/nak/rej packets and not affect transistions of the automaton 
- * so we just send a configure request packet and do nothing 
- * note: in RFC 1661 it rules we whould log this packet because it`s impossible that a correctly formed packet
-         will arrive through a coincidentally-timed cross-connection, but we will skip to log in our implementation
- */
-{ S_ACK_RECEIVED, 	E_RECV_CONFIG_ACK,								S_REQUEST_SENT,		{ A_send_config_request, 0 }},
-
-{ S_ACK_RECEIVED, 	E_RECV_CONFIG_NAK_REJ,							S_REQUEST_SENT,		{ A_send_config_request, 0 }},
-
-{ S_ACK_RECEIVED, 	E_RECV_TERMINATE_REQUEST,						S_REQUEST_SENT,		{ A_send_terminate_ack, 0 }},
-
-{ S_ACK_RECEIVED, 	E_RECV_TERMINATE_ACK,							S_REQUEST_SENT,		{ 0 }},
-
-{ S_ACK_RECEIVED, 	E_RECV_UNKNOWN_CODE,							S_ACK_RECEIVED,		{ A_send_code_reject, 0 }},
-
-{ S_ACK_RECEIVED, 	E_RECV_GOOD_CODE_PROTOCOL_REJECT,				S_REQUEST_SENT,		{ 0 }},
-
-{ S_ACK_RECEIVED, 	E_RECV_BAD_CODE_PROTOCOL_REJECT,				S_STOPPED,			{ A_this_layer_finish, 0 }},
-
-{ S_ACK_RECEIVED, 	E_RECV_ECHO_REPLY_REQUEST_DISCARD_REQUEST, 		S_ACK_RECEIVED,		{ 0 }},
-
-/*---------------------------------------------------------------------------*/
-{ S_ACK_SENT, 		E_DOWN,											S_STARTING, 		{ 0 }},
-
-{ S_ACK_SENT, 		E_OPEN,											S_ACK_SENT, 		{ 0 }},
-
-{ S_ACK_SENT, 		E_CLOSE,										S_CLOSING, 			{ A_init_restart_termin, A_send_terminate_request, 0 }},
-	
-{ S_ACK_SENT, 		E_TIMEOUT_COUNTER_POSITIVE,						S_ACK_SENT, 		{ A_send_config_request, 0 }},
-
-/* may be with "PASSIVE" option, with this option, ppp will not exit but then just wait for a valid LCP packet from peer if there is not received form peer */
-{ S_ACK_SENT, 		E_TIMEOUT_COUNTER_EXPIRED,						S_STOPPED, 			{ A_this_layer_finish, 0 }},
-
-{ S_ACK_SENT, 		E_RECV_GOOD_CONFIG_REQUEST,						S_ACK_SENT,			{ A_send_config_ack, 0 }},
-
-{ S_ACK_SENT, 		E_RECV_BAD_CONFIG_REQUEST,						S_REQUEST_SENT,		{ A_send_config_nak_rej, 0 }},
-
-{ S_ACK_SENT, 		E_RECV_CONFIG_ACK,								S_OPENED,			{ A_init_restart_count, A_this_layer_up, 0 }},
-
-{ S_ACK_SENT, 		E_RECV_CONFIG_NAK_REJ,							S_ACK_SENT,			{ A_init_restart_config, A_send_config_request, 0 }},
-
-{ S_ACK_SENT, 		E_RECV_TERMINATE_REQUEST,						S_REQUEST_SENT,		{ A_send_terminate_ack, 0 }},
-
-{ S_ACK_SENT, 		E_RECV_TERMINATE_ACK,							S_ACK_SENT,			{ 0 }},
-
-{ S_ACK_SENT, 		E_RECV_UNKNOWN_CODE,							S_ACK_SENT,			{ A_send_code_reject, 0 }},
-
-{ S_ACK_SENT, 		E_RECV_GOOD_CODE_PROTOCOL_REJECT,				S_ACK_SENT,			{ 0 }},
-
-{ S_ACK_SENT, 		E_RECV_BAD_CODE_PROTOCOL_REJECT,				S_STOPPED,			{ A_this_layer_finish, 0 }},
-
-{ S_ACK_SENT, 		E_RECV_ECHO_REPLY_REQUEST_DISCARD_REQUEST, 		S_ACK_SENT,			{ 0 }},
-
-/*---------------------------------------------------------------------------*/
-{ S_OPENED, 		E_DOWN,											S_STARTING, 		{ A_this_layer_down, 0 }},
-
-{ S_OPENED, 		E_OPEN,											S_OPENED, 			{ A_create_down_event, A_create_up_event, 0 }},
-
-{ S_OPENED, 		E_CLOSE,										S_CLOSING, 			{ A_this_layer_down, A_init_restart_termin, A_send_terminate_request, 0 }},
-
-{ S_OPENED, 		E_RECV_GOOD_CONFIG_REQUEST,						S_ACK_SENT,			{ A_this_layer_down, A_send_config_request, A_send_config_ack, 0 }},
-
-{ S_OPENED, 		E_RECV_BAD_CONFIG_REQUEST,						S_REQUEST_SENT,		{ A_this_layer_down, A_send_config_request, A_send_config_nak_rej, 0 }},
-
-/* we should silently discard invalid ack/nak/rej packets and not affect transistions of the automaton 
- * so we just send a configure request packet and do nothing 
- * note: in RFC 1661 it rules we whould log this packet because it`s impossible that a correctly formed packet
-         will arrive through a coincidentally-timed cross-connection, but we will skip to log in our implementation
- */
-{ S_OPENED, 		E_RECV_CONFIG_ACK,								S_REQUEST_SENT,		{ A_this_layer_down, A_send_config_request, 0 }},
-	
-{ S_OPENED, 		E_RECV_CONFIG_NAK_REJ,							S_REQUEST_SENT,		{ A_this_layer_down, A_send_config_request, 0 }},
-
-{ S_OPENED, 		E_RECV_TERMINATE_REQUEST,						S_STOPPING,			{ A_this_layer_down, A_init_restart_termin, A_send_terminate_request, A_send_terminate_ack, 0 }},
-
-{ S_OPENED, 		E_RECV_TERMINATE_ACK,							S_REQUEST_SENT,		{ A_this_layer_down, A_send_config_request, 0 }},
-
-{ S_OPENED, 		E_RECV_UNKNOWN_CODE,							S_OPENED,			{ A_send_code_reject, 0 }},
-
-{ S_OPENED, 		E_RECV_GOOD_CODE_PROTOCOL_REJECT,				S_OPENED,			{ 0 }},
-
-{ S_OPENED, 		E_RECV_BAD_CODE_PROTOCOL_REJECT,				S_STOPPING,			{ A_this_layer_down, A_init_restart_termin, A_send_terminate_request, 0 }},
-
-{ S_OPENED, 		E_RECV_ECHO_REPLY_REQUEST_DISCARD_REQUEST,		S_OPENED,			{ A_send_echo_reply, 0 }},
-
-{ S_INVLD, 0, 0, {0}}},
-
-{{ S_INIT,		  	E_UP,     							    		S_CLOSED,		    { 0 }},
-
-/* these actions are "this layer start" (tls) and should retern "UP" event */
-{ S_INIT,		  	E_OPEN,     						    		S_STARTING,		    { A_this_layer_start, 0 }},
-
-{ S_INIT, 			E_CLOSE,							      		S_INIT, 		    { 0 }},	                                                      	  
-
-/*---------------------------------------------------------------------------*/
-{ S_STARTING,		E_UP,     							    		S_REQUEST_SENT,	  	{ A_send_config_request, A_init_restart_config, 0 }},
-
-{ S_STARTING,		E_OPEN,    							    		S_STARTING,		    { 0 }},
-
-/* these actions are "this layer finish" (tlf) and should retern "DOWN" event */
-{ S_STARTING,		E_CLOSE,    						    		S_INIT,			    { A_this_layer_finish, 0 }},
-
-/*---------------------------------------------------------------------------*/
-{ S_CLOSED,			E_DOWN, 							      		S_INIT,			    { A_create_close_to_lower_layer, 0 }},
-
-{ S_CLOSED,			E_OPEN, 							      		S_REQUEST_SENT,	  	{ A_send_config_request, A_init_restart_config, 0 }},
-
-{ S_CLOSED,			E_CLOSE, 							      		S_CLOSED,		    { 0 }},
-
-{ S_CLOSED,			E_RECV_GOOD_CONFIG_REQUEST, 					S_CLOSED,		    { A_send_terminate_ack, 0 }},
-
-{ S_CLOSED,			E_RECV_BAD_CONFIG_REQUEST, 						S_CLOSED,		    { A_send_terminate_ack, 0 }},
-
-{ S_CLOSED,			E_RECV_CONFIG_ACK, 								S_CLOSED,		    { A_send_terminate_ack, 0 }},
-
-{ S_CLOSED,			E_RECV_CONFIG_NAK_REJ, 							S_CLOSED,		    { A_send_terminate_ack, 0 }},
-
-{ S_CLOSED,			E_RECV_TERMINATE_REQUEST, 						S_CLOSED,		    { A_send_terminate_ack, 0 }},
-
-{ S_CLOSED,			E_RECV_TERMINATE_ACK, 							S_CLOSED,		    { 0 }},
-
-{ S_CLOSED,			E_RECV_UNKNOWN_CODE, 							S_CLOSED,		    { A_send_code_reject, 0 }},
-
-/* recv code/protocol reject when rejected value is acceptable, 
-	such as a Code-Reject of an extended code, 
-	or a Protocol-Reject of a NCP */ 
-{ S_CLOSED,			E_RECV_GOOD_CODE_PROTOCOL_REJECT, 				S_CLOSED,	  		{ 0 }},
-
-{ S_CLOSED,			E_RECV_BAD_CODE_PROTOCOL_REJECT, 				S_CLOSED,			{ A_this_layer_finish, 0 }},
-
-{ S_CLOSED,			E_RECV_ECHO_REPLY_REQUEST_DISCARD_REQUEST, 		S_CLOSED,			{ 0 }},
-
-/*---------------------------------------------------------------------------*/
-{ S_STOPPED,		E_DOWN,     						   			S_STARTING,		    { A_this_layer_start, 0 }},
-
-{ S_STOPPED,		E_OPEN,     						   			S_STOPPED,		    { A_create_down_event, A_create_up_event, 0 }},
-
-{ S_STOPPED,		E_CLOSE,     						   			S_CLOSED,		    { 0 }},
-
-{ S_STOPPED,		E_RECV_GOOD_CONFIG_REQUEST,						S_ACK_SENT,		    { A_init_restart_config, A_send_config_request, A_send_config_ack, 0 }},
-
-{ S_STOPPED,		E_RECV_BAD_CONFIG_REQUEST, 						S_REQUEST_SENT,	  	{ A_init_restart_config, A_send_config_request, A_send_config_nak_rej, 0 }},
-
-{ S_STOPPED,		E_RECV_CONFIG_ACK, 				 				S_STOPPED,		    { A_send_terminate_ack, 0 }},
-
-{ S_STOPPED,		E_RECV_CONFIG_NAK_REJ, 		 					S_STOPPED,		    { A_send_terminate_ack, 0 }},
-
-{ S_STOPPED,		E_RECV_TERMINATE_REQUEST,  						S_STOPPED,		    { A_send_terminate_ack, 0 }},
-
-{ S_STOPPED,		E_RECV_TERMINATE_ACK, 		 					S_STOPPED,		    { 0 }},
-
-{ S_STOPPED,		E_RECV_UNKNOWN_CODE, 			 				S_STOPPED,		    { A_send_code_reject, 0 }},
-
-/* recv code/protocol reject when rejected value is acceptable, 
-	such as a Code-Reject of an extended code, 
-	or a Protocol-Reject of a NCP */ 
-{ S_STOPPED,		E_RECV_GOOD_CODE_PROTOCOL_REJECT, 				S_STOPPED,			{ 0 }},
-
-{ S_STOPPED,		E_RECV_BAD_CODE_PROTOCOL_REJECT, 				S_STOPPED,			{ A_this_layer_finish, 0 }},
-
-{ S_STOPPED,		E_RECV_ECHO_REPLY_REQUEST_DISCARD_REQUEST, 		S_STOPPED,			{ 0 }},
-
-/*---------------------------------------------------------------------------*/
-{ S_CLOSING, 		E_DOWN,								     		S_INIT,			    { 0 }},
-
-{ S_CLOSING, 		E_OPEN,								     		S_STOPPING,		    { A_create_down_event, A_create_up_event, 0 }},
-
-{ S_CLOSING, 		E_CLOSE,							     		S_CLOSING,		    { 0 }},
-
-{ S_CLOSING, 		E_TIMEOUT_COUNTER_POSITIVE,						S_CLOSING,		    { A_send_terminate_request, 0 }},
-
-{ S_CLOSING, 		E_TIMEOUT_COUNTER_EXPIRED, 						S_CLOSED,		    { A_this_layer_finish, 0 }},
-
-{ S_CLOSING,		E_RECV_GOOD_CONFIG_REQUEST,						S_CLOSING,		    { 0 }},
-
-{ S_CLOSING,		E_RECV_BAD_CONFIG_REQUEST, 						S_CLOSING,		    { 0 }},
-
-{ S_CLOSING,		E_RECV_CONFIG_ACK, 				 				S_CLOSING,		    { 0 }},
-
-{ S_CLOSING,		E_RECV_CONFIG_NAK_REJ, 		 					S_CLOSING,		    { 0 }},
-
-{ S_CLOSING,		E_RECV_TERMINATE_REQUEST,  						S_CLOSING,		    { A_send_terminate_ack, 0 }},
-
-{ S_CLOSING,		E_RECV_TERMINATE_ACK, 		 					S_CLOSED,		    { A_create_down_event, A_create_up_event, 0 }},
-
-{ S_CLOSING,		E_RECV_UNKNOWN_CODE, 			 				S_CLOSING,		    { A_send_code_reject, 0 }},
-
-/* recv code/protocol reject when rejected value is acceptable, 
-	such as a Code-Reject of an extended code, 
-	or a Protocol-Reject of a NCP */ 
-{ S_CLOSING,		E_RECV_GOOD_CODE_PROTOCOL_REJECT, 				S_CLOSING,  		{ 0 }},
-
-{ S_CLOSING,		E_RECV_BAD_CODE_PROTOCOL_REJECT, 				S_CLOSED,			{ A_this_layer_finish, 0 }},
-
-{ S_CLOSING,		E_RECV_ECHO_REPLY_REQUEST_DISCARD_REQUEST, 		S_CLOSING,			{ 0 }},
-
-/*---------------------------------------------------------------------------*/
-{ S_STOPPING, 		E_DOWN,								     		S_STARTING, 	    { 0 }},
-
-{ S_STOPPING, 		E_OPEN,								     		S_STOPPING, 	    { A_create_down_event, A_create_up_event, 0 }},
-
-{ S_STOPPING, 		E_CLOSE,							     		S_CLOSING, 		    { 0 }},
-
-{ S_STOPPING, 		E_TIMEOUT_COUNTER_POSITIVE,						S_STOPPING,		    { A_send_terminate_request, 0 }},
-
-{ S_STOPPING, 		E_TIMEOUT_COUNTER_EXPIRED, 						S_STOPPED,		    { A_this_layer_finish, 0 }},
-
-{ S_STOPPING,		E_RECV_GOOD_CONFIG_REQUEST,     				S_STOPPING,			{ 0 }},
-
-{ S_STOPPING,		E_RECV_BAD_CONFIG_REQUEST,     					S_STOPPING,			{ 0 }},
-
-{ S_STOPPING,		E_RECV_CONFIG_ACK, 								S_STOPPING,			{ 0 }},
-
-{ S_STOPPING,		E_RECV_CONFIG_NAK_REJ, 							S_STOPPING,			{ 0 }},
-
-{ S_STOPPING,		E_RECV_TERMINATE_REQUEST, 						S_STOPPING,			{ A_send_terminate_ack, 0 }},
-
-{ S_STOPPING,		E_RECV_TERMINATE_ACK, 							S_STOPPED,			{ A_create_down_event, A_create_up_event, 0 }},
-
-{ S_STOPPING,		E_RECV_UNKNOWN_CODE, 							S_STOPPING,			{ A_send_code_reject, 0 }},
-
-/* recv code/protocol reject when rejected value is acceptable, 
-	such as a Code-Reject of an extended code, 
-	or a Protocol-Reject of a NCP */ 
-{ S_STOPPING,		E_RECV_GOOD_CODE_PROTOCOL_REJECT, 				S_STOPPING,			{ 0 }},
-
-{ S_STOPPING,		E_RECV_BAD_CODE_PROTOCOL_REJECT, 				S_STOPPED,			{ A_this_layer_finish, 0 }},
-
-{ S_STOPPING,		E_RECV_ECHO_REPLY_REQUEST_DISCARD_REQUEST, 		S_STOPPING,			{ 0 }},
-
-/*---------------------------------------------------------------------------*/
-{ S_REQUEST_SENT, 	E_DOWN,											S_STARTING, 		{ 0 }},
-
-{ S_REQUEST_SENT, 	E_OPEN,											S_REQUEST_SENT, 	{ 0 }},
-
-{ S_REQUEST_SENT,	E_CLOSE,										S_CLOSING, 			{ A_init_restart_termin, A_send_terminate_request, 0 }},
-
-{ S_REQUEST_SENT, 	E_TIMEOUT_COUNTER_POSITIVE,						S_REQUEST_SENT, 	{ A_send_config_request, 0 }},
-
-/* may be with "PASSIVE" option, with this option, ppp will not exit but then just wait for a valid LCP packet from peer if there is not received form peer */
-{ S_REQUEST_SENT,   E_TIMEOUT_COUNTER_EXPIRED,		                S_STOPPED, 		    { A_this_layer_finish, 0 }},
-
-{ S_REQUEST_SENT,   E_RECV_GOOD_CONFIG_REQUEST,		                S_ACK_SENT,		    { A_send_config_ack, 0 }},
-
-{ S_REQUEST_SENT,   E_RECV_BAD_CONFIG_REQUEST,		                S_REQUEST_SENT,	    { A_send_config_nak_rej, 0 }},
-
-{ S_REQUEST_SENT,   E_RECV_CONFIG_ACK,				                S_ACK_RECEIVED,	    { A_init_restart_count, 0 }},
-
-{ S_REQUEST_SENT,   E_RECV_CONFIG_NAK_REJ,			                S_REQUEST_SENT,	    { A_init_restart_config, A_send_config_request, 0 }},
-
-{ S_REQUEST_SENT,   E_RECV_TERMINATE_REQUEST,			            S_REQUEST_SENT,	    { A_send_terminate_ack, 0 }},
-
-{ S_REQUEST_SENT,   E_RECV_TERMINATE_ACK,				            S_REQUEST_SENT,	    { 0 }},
-
-{ S_REQUEST_SENT,   E_RECV_UNKNOWN_CODE,				            S_REQUEST_SENT,	    { A_send_code_reject, 0 }},
-
-{ S_REQUEST_SENT,   E_RECV_GOOD_CODE_PROTOCOL_REJECT,	            S_REQUEST_SENT,	    { 0 }},
-
-{ S_REQUEST_SENT,   E_RECV_BAD_CODE_PROTOCOL_REJECT,	            S_STOPPED,		    { A_this_layer_finish, 0 }},
-
-{ S_REQUEST_SENT,   E_RECV_ECHO_REPLY_REQUEST_DISCARD_REQUEST,      S_REQUEST_SENT,	    { 0 }},
-
-/*---------------------------------------------------------------------------*/
-{ S_ACK_RECEIVED,   E_DOWN,							                S_STARTING, 	    { 0 }},
-
-{ S_ACK_RECEIVED,   E_OPEN,							                S_ACK_RECEIVED,     { 0 }},
-
-{ S_ACK_RECEIVED,   E_CLOSE,							            S_CLOSING, 		    { A_init_restart_termin, A_send_terminate_request, 0 }},
-
-{ S_ACK_RECEIVED,   E_TIMEOUT_COUNTER_POSITIVE,		                S_REQUEST_SENT,     { A_send_config_request, 0 }},
-
-/* may be with "PASSIVE" option, with this option, ppp will not exit but then just wait for a valid LCP packet from peer if there is not received form peer */
-{ S_ACK_RECEIVED,   E_TIMEOUT_COUNTER_EXPIRED,		                S_STOPPED, 		    { A_this_layer_finish, 0 }},
-
-{ S_ACK_RECEIVED,   E_RECV_GOOD_CONFIG_REQUEST,		                S_OPENED,		    { A_send_config_ack, A_this_layer_up, 0 }},
-
-{ S_ACK_RECEIVED,   E_RECV_BAD_CONFIG_REQUEST,		                S_ACK_RECEIVED,	    { A_send_config_nak_rej, 0 }},
-
-/* we should silently discard invalid ack/nak/rej packets and not affect transistions of the automaton 
- * so we just send a configure request packet and do nothing 
- * note: in RFC 1661 it rules we whould log this packet because it`s impossible that a correctly formed packet
-         will arrive through a coincidentally-timed cross-connection, but we will skip to log in our implementation
- */
-{ S_ACK_RECEIVED,   E_RECV_CONFIG_ACK,				                S_REQUEST_SENT,	    { A_send_config_request, 0 }},
-
-{ S_ACK_RECEIVED,   E_RECV_CONFIG_NAK_REJ,			                S_REQUEST_SENT,	    { A_send_config_request, 0 }},
-
-{ S_ACK_RECEIVED,   E_RECV_TERMINATE_REQUEST,			            S_REQUEST_SENT,	    { A_send_terminate_ack, 0 }},
-
-{ S_ACK_RECEIVED,   E_RECV_TERMINATE_ACK,				            S_REQUEST_SENT,	    { 0 }},
-
-{ S_ACK_RECEIVED,   E_RECV_UNKNOWN_CODE,				            S_ACK_RECEIVED,	    { A_send_code_reject, 0 }},
-
-{ S_ACK_RECEIVED,   E_RECV_GOOD_CODE_PROTOCOL_REJECT,	            S_REQUEST_SENT,	    { 0 }},
-
-{ S_ACK_RECEIVED,   E_RECV_BAD_CODE_PROTOCOL_REJECT,	            S_STOPPED,		    { A_this_layer_finish, 0 }},
-
-{ S_ACK_RECEIVED,   E_RECV_ECHO_REPLY_REQUEST_DISCARD_REQUEST,      S_ACK_RECEIVED,	    { 0 }},
-
-/*---------------------------------------------------------------------------*/
-{ S_ACK_SENT, 	    E_DOWN,								            S_STARTING, 	    { 0 }},
-
-{ S_ACK_SENT, 	    E_OPEN,								            S_ACK_SENT, 	    { 0 }},
-
-{ S_ACK_SENT, 	    E_CLOSE,							            S_CLOSING, 		    { A_init_restart_termin, A_send_terminate_request, 0 }},
-	
-{ S_ACK_SENT, 	    E_TIMEOUT_COUNTER_POSITIVE,			            S_ACK_SENT, 	    { A_send_config_request, 0 }},
-
-/* may be with "PASSIVE" option, with this option, ppp will not exit but then just wait for a valid LCP packet from peer if there is not received form peer */
-{ S_ACK_SENT, 	    E_TIMEOUT_COUNTER_EXPIRED,			            S_STOPPED, 		    { A_this_layer_finish, 0 }},
-
-{ S_ACK_SENT, 	    E_RECV_GOOD_CONFIG_REQUEST,			            S_ACK_SENT,		    { A_send_config_ack, 0 }},
-
-{ S_ACK_SENT, 	    E_RECV_BAD_CONFIG_REQUEST,			            S_REQUEST_SENT,	    { A_send_config_nak_rej, 0 }},
-
-{ S_ACK_SENT, 	    E_RECV_CONFIG_ACK,					            S_OPENED,		    { A_init_restart_count, A_this_layer_up, 0 }},
-
-{ S_ACK_SENT, 	    E_RECV_CONFIG_NAK_REJ,				            S_ACK_SENT,		    { A_init_restart_config, A_send_config_request, 0 }},
-
-{ S_ACK_SENT, 	    E_RECV_TERMINATE_REQUEST,			            S_REQUEST_SENT,	    { A_send_terminate_ack, 0 }},
-
-{ S_ACK_SENT, 	    E_RECV_TERMINATE_ACK,				            S_ACK_SENT,		    { 0 }},
-
-{ S_ACK_SENT, 	    E_RECV_UNKNOWN_CODE,				            S_ACK_SENT,		    { A_send_code_reject, 0 }},
-
-{ S_ACK_SENT, 	    E_RECV_GOOD_CODE_PROTOCOL_REJECT,	            S_ACK_SENT,		    { 0 }},
-
-{ S_ACK_SENT, 	    E_RECV_BAD_CODE_PROTOCOL_REJECT,	            S_STOPPED,		    { A_this_layer_finish, 0 }},
-
-{ S_ACK_SENT, 	    E_RECV_ECHO_REPLY_REQUEST_DISCARD_REQUEST,      S_ACK_SENT,	        { 0 }},
-
-/*---------------------------------------------------------------------------*/
-{ S_OPENED, 	    E_DOWN,								            S_STARTING, 	    { A_this_layer_down, 0 }},
-
-{ S_OPENED, 	    E_OPEN,								            S_OPENED, 		    { A_create_down_event, A_create_up_event, 0 }},
-
-{ S_OPENED, 	    E_CLOSE,							            S_CLOSING, 		    { A_this_layer_down, A_init_restart_termin, A_send_terminate_request, 0 }},
-
-{ S_OPENED, 	    E_RECV_GOOD_CONFIG_REQUEST,			            S_ACK_SENT,		    { A_this_layer_down, A_send_config_request, A_send_config_ack, 0 }},
-
-{ S_OPENED, 	    E_RECV_BAD_CONFIG_REQUEST,			            S_REQUEST_SENT,	    { A_this_layer_down, A_send_config_request, A_send_config_nak_rej, 0 }},
-
-/* we should silently discard invalid ack/nak/rej packets and not affect transistions of the automaton 
- * so we just send a configure request packet and do nothing 
- * note: in RFC 1661 it rules we whould log this packet because it`s impossible that a correctly formed packet
-         will arrive through a coincidentally-timed cross-connection, but we will skip to log in our implementation
- */
-{ S_OPENED, 	    E_RECV_CONFIG_ACK,					            S_REQUEST_SENT,	    { A_this_layer_down, A_send_config_request, 0 }},
-	
-{ S_OPENED, 	    E_RECV_CONFIG_NAK_REJ,				            S_REQUEST_SENT,	    { A_this_layer_down, A_send_config_request, 0 }},
-
-{ S_OPENED, 	    E_RECV_TERMINATE_REQUEST,			            S_STOPPING,		    { A_this_layer_down, A_zero_restart_count, A_send_terminate_ack, 0 }},
-
-{ S_OPENED, 	    E_RECV_TERMINATE_ACK,				            S_REQUEST_SENT,	    { A_this_layer_down, A_send_config_request, 0 }},
-
-{ S_OPENED, 	    E_RECV_UNKNOWN_CODE,				            S_OPENED,		    { A_send_code_reject, 0 }},
-
-{ S_OPENED, 	    E_RECV_GOOD_CODE_PROTOCOL_REJECT,	            S_OPENED,		    { 0 }},
-
-{ S_OPENED, 	    E_RECV_BAD_CODE_PROTOCOL_REJECT,	            S_STOPPING,		    { A_this_layer_down, A_init_restart_termin, A_send_terminate_request, 0 }},
-
-{ S_OPENED, 	    E_RECV_ECHO_REPLY_REQUEST_DISCARD_REQUEST,      S_OPENED,           { A_send_echo_reply, 0 }},
-
-{ S_INVLD, 0, 0, {0}}}
+extern struct rte_mempool 		*mbuf_pool;
+extern struct rte_ring 			*rte_ring;
+extern struct rte_ring 			*decap_udp, *decap_tcp, *encap_udp, *encap_tcp;
+extern rte_atomic16_t			cp_recv_cums;
+uint8_t 						cp_recv_prod;
+extern uint8_t					vendor_id;
+
+static uint16_t 				nb_rxd = RX_RING_SIZE;
+static uint16_t 				nb_txd = TX_RING_SIZE;
+
+static struct rte_eth_conf port_conf_default = {
+	.rxmode = { .max_rx_pkt_len = RTE_ETHER_MAX_LEN, }, 
+	.txmode = { .offloads = DEV_TX_OFFLOAD_IPV4_CKSUM | 
+							DEV_TX_OFFLOAD_UDP_CKSUM | 
+							DEV_TX_OFFLOAD_TCP_CKSUM, },
+	.intr_conf = {
+        .lsc = 1, /**< link status interrupt feature enabled */ },
 };
+extern uint16_t 	get_checksum(const void *const addr, const size_t bytes);
+extern STATUS 		PPP_FSM(struct rte_timer *ppp, tPPP_PORT *port_ccb, U16 event);
+int 				PPP_PORT_INIT(uint16_t port);
+int 				ppp_recvd(void);
+int 				encapsulation_udp(void);
+int 				encapsulation_tcp(void);
+int 				control_plane_dequeue(tPPP_MBX **mail);
+int 				decapsulation_udp(void);
+int 				decapsulation_tcp(void);
+int 				gateway(void);
+void 				drv_xmit(U8 *mu, U16 mulen);
+static int			lsi_event_callback(uint16_t port_id, enum rte_eth_event_type type, void *param);
 
-/***********************************************************************
- * PPP_FSM
- *
- * purpose : finite state machine.
- * input   : ppp - timer
- *			 port_ccb - user connection info.
- *           event -
- * return  : error status
- ***********************************************************************/
-STATUS PPP_FSM(struct rte_timer *ppp, tPPP_PORT *port_ccb, U16 event)
-{	
-    register int  	i,j;
-    int			    retval;
-    char 			str1[30],str2[30];
+int PPP_PORT_INIT(uint16_t port)
+{
+	struct rte_eth_conf port_conf = port_conf_default;
+	struct rte_eth_dev_info dev_info;
+	const uint16_t rx_rings = 1, tx_rings = 4;
+	int retval;
+	uint16_t q;
 
-    if (!port_ccb) {
-        DBG_PPP(DBGLVL1,port_ccb,"Error! No port found for the event(%d)\n",event);
-        return FALSE;
-    }
-    
-    /* Find a matched state */
-    for(i=0; ppp_fsm_tbl[port_ccb->cp][i].state!=S_INVLD; i++)
-        if (ppp_fsm_tbl[port_ccb->cp][i].state == port_ccb->ppp_phase[port_ccb->cp].state)
-            break;
-    #ifdef _DP_DBG
-    DBG_PPP(DBGLVL1,port_ccb,"Current state is %s\n",PPP_state2str(ppp_fsm_tbl[port_ccb->cp][i].state));
-    printf("control protocol = %d\n", port_ccb->cp);
-    #endif
+	if (vendor_id > VMXNET3)
+		port_conf.intr_conf.lsc = 0;
+	if (!rte_eth_dev_is_valid_port(port))
+		return -1;
+	rte_eth_dev_info_get(port, &dev_info);
+	if (dev_info.tx_offload_capa & DEV_TX_OFFLOAD_MBUF_FAST_FREE)
+		port_conf.txmode.offloads |= DEV_TX_OFFLOAD_MBUF_FAST_FREE;
 
-    if (ppp_fsm_tbl[port_ccb->cp][i].state == S_INVLD) {
-        DBG_PPP(DBGLVL1,port_ccb,"Error! unknown state(%d) specified for the event(%d)\n",
-        	port_ccb->ppp_phase[port_ccb->cp].state,event);
-        return FALSE;
-    }
+	retval = rte_eth_dev_configure(port, rx_rings, tx_rings, &port_conf);
+	if (retval != 0)
+		return retval;
+	retval = rte_eth_dev_adjust_nb_rx_tx_desc(port, &nb_rxd,&nb_txd);
+	if (retval < 0)
+		rte_exit(EXIT_FAILURE,"Cannot adjust number of descriptors: err=%d, ""port=%d\n", retval, port);
 
-    /*
-     * Find a matched event in a specific state.
-     * Note : a state can accept several events.
-     */
-    for(;ppp_fsm_tbl[port_ccb->cp][i].state==port_ccb->ppp_phase[port_ccb->cp].state; i++)
-        if (ppp_fsm_tbl[port_ccb->cp][i].event == event)
-            break;
-    
-    if (ppp_fsm_tbl[port_ccb->cp][i].state != port_ccb->ppp_phase[port_ccb->cp].state) { /* search until meet the next state */
-        DBG_PPP(DBGLVL1,port_ccb,"error! invalid event(%d) in state(%s)\n",
-            event, PPP_state2str(port_ccb->ppp_phase[port_ccb->cp].state));
-  		return TRUE; /* still pass to endpoint */
-    }
-    
-    /* Correct state found */
-    if (port_ccb->ppp_phase[port_ccb->cp].state != ppp_fsm_tbl[port_ccb->cp][i].next_state) {
-        strcpy(str1,PPP_state2str(port_ccb->ppp_phase[port_ccb->cp].state));
-        strcpy(str2,PPP_state2str(ppp_fsm_tbl[port_ccb->cp][i].next_state));
-        #ifdef _DP_DBG
-        DBG_PPP(DBGLVL1,port_ccb,"state changed from %s to %s\n",str1,str2);
-        #endif
-        RTE_LOG(INFO,EAL,"Session 0x%x %s state changed from %s to %s.\n", rte_cpu_to_be_16(port_ccb->session_id), (port_ccb->cp == 1 ? "IPCP" : "LCP"), str1, str2);
-        port_ccb->ppp_phase[port_ccb->cp].state = ppp_fsm_tbl[port_ccb->cp][i].next_state;
-    }
-    
-    for(j=0; ppp_fsm_tbl[port_ccb->cp][i].hdl[j]; j++) {
-    	port_ccb->ppp_phase[port_ccb->cp].timer_counter = 10;
-       	retval = (*ppp_fsm_tbl[port_ccb->cp][i].hdl[j])(ppp,port_ccb);
-       	if (!retval)  
-            return TRUE;
-    }
-    return TRUE;
+	rte_eth_dev_callback_register(port,RTE_ETH_EVENT_INTR_LSC,(rte_eth_dev_cb_fn)lsi_event_callback, NULL);
+
+	/* Allocate and set up 1 RX queue per Ethernet port. */
+	for(q=0; q<rx_rings; q++) {
+		retval = rte_eth_rx_queue_setup(port,q,nb_rxd,rte_eth_dev_socket_id(port),NULL,mbuf_pool);
+		if (retval < 0)
+			return retval;
+	}
+
+	/* Allocate and set up 4 TX queue per Ethernet port. */
+	for(q=0; q<tx_rings; q++) {
+		retval = rte_eth_tx_queue_setup(port,q,nb_txd,rte_eth_dev_socket_id(port), NULL);
+		if (retval < 0)
+			return retval;
+	}
+
+	/* Start the Ethernet port. */
+	retval = rte_eth_dev_start(port);
+	if (retval < 0)
+		return retval;
+	//rte_eth_promiscuous_enable(port);
+	return 0;
 }
 
-/* this layer up/down/start/finish */
-STATUS A_this_layer_start(__attribute__((unused)) struct rte_timer *tim, __attribute__((unused)) tPPP_PORT *port_ccb)
+int ppp_recvd(void)
 {
-    PPP_FSM(tim,port_ccb,E_UP);
+	struct rte_mbuf 	*single_pkt;
+	uint64_t 			total_tx;
+	struct rte_ether_hdr *eth_hdr, tmp_eth_hdr;
+	//vlan_header_t		*vlan_header, tmp_vlan_header;
+	struct rte_ipv4_hdr 	*ip_hdr;
+	struct rte_icmp_hdr		*icmphdr;
+	struct rte_mbuf 	*pkt[BURST_SIZE];
+	uint16_t 			ori_port_id, nb_rx;
+	ppp_payload_t 		*ppp_payload;
+	tPPP_MBX 			*mail = rte_malloc(NULL,sizeof(tPPP_MBX)*32,65536);
+	int 				i;
+	uint32_t 			icmp_new_cksum;
+	char 				*cur;
+	uint16_t 			user_index;
+	
+	usleep(500000);
+	for(;;) {
+		nb_rx = rte_eth_rx_burst(1,0,pkt,BURST_SIZE);
+		if (nb_rx == 0)
+			continue;
+		total_tx = 0;
+		for(i=0; i<nb_rx; i++) {
+			single_pkt = pkt[i];
+			rte_prefetch0(rte_pktmbuf_mtod(single_pkt, void *));
+			eth_hdr = rte_pktmbuf_mtod(single_pkt,struct rte_ether_hdr*);
+			if (unlikely(eth_hdr->ether_type != rte_cpu_to_be_16(ETH_P_PPP_SES) && eth_hdr->ether_type != rte_cpu_to_be_16(ETH_P_PPP_DIS))) {
+				rte_pktmbuf_free(single_pkt);
+				continue;
+			}
+			//vlan_header = (vlan_header_t *)(rte_pktmbuf_mtod(single_pkt, unsigned char *) + sizeof(struct rte_ether_hdr));
+			/*if (unlikely(vlan_header->next_proto != rte_cpu_to_be_16(ETH_P_PPP_SES) && vlan_header->next_proto != rte_cpu_to_be_16(ETH_P_PPP_DIS))) {
+				rte_pktmbuf_free(single_pkt);
+				continue;
+			}*/
+			ppp_payload = ((ppp_payload_t *)((char *)eth_hdr + sizeof(struct rte_ether_hdr) /*+ sizeof(vlan_header_t)*/ + sizeof(pppoe_header_t)));
+			if (unlikely(/*vlan_header->next_proto*/eth_hdr->ether_type == rte_cpu_to_be_16(ETH_P_PPP_DIS) || (ppp_payload->ppp_protocol == rte_cpu_to_be_16(LCP_PROTOCOL) || ppp_payload->ppp_protocol == rte_cpu_to_be_16(AUTH_PROTOCOL) || ppp_payload->ppp_protocol == rte_cpu_to_be_16(IPCP_PROTOCOL)))) {
+				/* We need to maintain our ring queue */
+				if (rte_atomic16_read(&cp_recv_cums) != ((cp_recv_prod + 1) % 32)) {
+					rte_memcpy((mail+cp_recv_prod)->refp,eth_hdr,single_pkt->data_len);
+					(mail + cp_recv_prod)->type = IPC_EV_TYPE_DRV;
+					(mail + cp_recv_prod)->len = single_pkt->data_len;
+					//enqueue eth_hdr single_pkt->data_len
+					cur = (char *)(mail + cp_recv_prod);
+					rte_ring_enqueue_burst(rte_ring,(void **)&cur,1,NULL);
+					cp_recv_prod++;
+					if (cp_recv_prod >= 32)
+						cp_recv_prod = 0;
+				}
+				rte_pktmbuf_free(single_pkt);
+				continue;
+			}
+			/*vlan_header->next_proto*/eth_hdr->ether_type = rte_cpu_to_be_16(FRAME_TYPE_IP);
+			rte_memcpy(&tmp_eth_hdr,eth_hdr,sizeof(struct rte_ether_hdr));
+			//rte_memcpy(&tmp_vlan_header,vlan_header,sizeof(struct rte_ether_hdr));
+			rte_memcpy((char *)eth_hdr+8,&tmp_eth_hdr,sizeof(struct rte_ether_hdr));
+			//rte_memcpy((char *)vlan_header+8,&tmp_vlan_header,sizeof(vlan_header_t));
+			single_pkt->data_off += 8;
+			single_pkt->pkt_len -= 8;
+			single_pkt->data_len -= 8;
+			eth_hdr = (struct rte_ether_hdr *)((char *)eth_hdr + 8);
+			//vlan_header = (vlan_header_t *)(eth_hdr + 1);
+			user_index = 0;//(rte_be_to_cpu_16(vlan_header->tci_union.tci_value) & 0xFFF) - 2;
+			ip_hdr = (struct rte_ipv4_hdr *)(rte_pktmbuf_mtod(single_pkt, unsigned char *) + sizeof(struct rte_ether_hdr) /*+ sizeof(vlan_header_t)*/);
+			single_pkt->l2_len = sizeof(struct rte_ether_hdr) /*+ sizeof(vlan_header_t)*/;
+			single_pkt->l3_len = sizeof(struct rte_ipv4_hdr);
+			switch(ip_hdr->next_proto_id) {
+				case PROTO_TYPE_ICMP:
+					ip_hdr->hdr_checksum = 0;
 
-    return TRUE;
+					icmphdr = (struct rte_icmp_hdr *)(rte_pktmbuf_mtod(single_pkt, unsigned char *) + sizeof(struct rte_ether_hdr) /*+ sizeof(vlan_header_t)*/ + sizeof(struct rte_ipv4_hdr));
+					single_pkt->ol_flags |= PKT_TX_IPV4 | PKT_TX_IP_CKSUM;
+					ori_port_id = rte_cpu_to_be_16(icmphdr->icmp_ident);
+					int16_t icmp_cksum_diff = icmphdr->icmp_ident - ppp_ports[user_index].addr_table[ori_port_id].port_id;
+					rte_memcpy(eth_hdr->s_addr.addr_bytes,ppp_ports[user_index].lan_mac,ETH_ALEN);
+					rte_memcpy(eth_hdr->d_addr.addr_bytes,ppp_ports[user_index].addr_table[ori_port_id].mac_addr,ETH_ALEN);
+					ip_hdr->dst_addr = ppp_ports[user_index].addr_table[ori_port_id].src_ip;
+					icmphdr->icmp_ident = ppp_ports[user_index].addr_table[ori_port_id].port_id;
+					ppp_ports[user_index].addr_table[ori_port_id].is_alive = 10;
+
+					if (((icmp_new_cksum = icmp_cksum_diff + icmphdr->icmp_cksum) >> 16) != 0)
+						icmp_new_cksum = (icmp_new_cksum & 0xFFFF) + (icmp_new_cksum >> 16);
+					icmphdr->icmp_cksum = (uint16_t)icmp_new_cksum;
+					#ifdef _DP_DBG
+					puts("nat mapping at port 1");
+					#endif
+					break;
+				case PROTO_TYPE_UDP:
+					rte_ring_enqueue_burst(decap_udp,(void **)&single_pkt,1,NULL);
+					//rte_pktmbuf_free(single_pkt);
+					continue;
+				case PROTO_TYPE_TCP:
+					rte_ring_enqueue_burst(decap_tcp,(void **)&single_pkt,1,NULL);
+					//rte_pktmbuf_free(single_pkt);
+					continue;
+				default:
+					rte_pktmbuf_free(single_pkt);
+					continue;
+			}
+			pkt[total_tx++] = single_pkt;
+		}
+		if (likely(total_tx > 0)) {
+			uint16_t nb_tx = rte_eth_tx_burst(0,1,pkt,total_tx);
+			if (unlikely(nb_tx < total_tx)) {
+				for(uint16_t buf=nb_tx; buf<total_tx; buf++)
+					rte_pktmbuf_free(pkt[buf]);
+			}
+		}
+	}
+	return 0;
 }
 
-STATUS A_this_layer_finish(__attribute__((unused)) struct rte_timer *tim, __attribute__((unused)) tPPP_PORT *port_ccb)
+int decapsulation_udp(void)
 {
-    PPP_FSM(tim,port_ccb,E_DOWN);
+	uint64_t 			total_tx;
+	struct rte_ether_hdr 	*eth_hdr;
+	//vlan_header_t		*vlan_header;
+	struct rte_ipv4_hdr 	*ip_hdr;
+	struct rte_udp_hdr 		*udphdr;
+	uint16_t 			ori_port_id, burst_size, user_index;
+	struct rte_mbuf 	*pkt[BURST_SIZE], *single_pkt;
+	int 				i;
+	
+	for(i=0; i<BURST_SIZE; i++)
+		pkt[i] = rte_pktmbuf_alloc(mbuf_pool);
 
-    return TRUE;
+	for(;;) {
+		burst_size = rte_ring_dequeue_burst(decap_udp,(void **)pkt,BURST_SIZE,NULL);
+		if (unlikely(burst_size == 0))
+			continue;
+		total_tx = 0;
+		for(i=0; i<burst_size; i++) {
+			single_pkt = pkt[i];
+			rte_prefetch0(rte_pktmbuf_mtod(single_pkt,void *));
+			eth_hdr = rte_pktmbuf_mtod(single_pkt,struct rte_ether_hdr*);
+			//vlan_header = (vlan_header_t *)(eth_hdr + 1);
+			user_index = 0;//(rte_be_to_cpu_16(vlan_header->tci_union.tci_value) & 0xFFF) - 2;
+			/* for NAT mapping */
+			ip_hdr = (struct rte_ipv4_hdr *)(rte_pktmbuf_mtod(single_pkt,unsigned char *) + sizeof(struct rte_ether_hdr) /*+ sizeof(vlan_header_t)*/);
+			ip_hdr->hdr_checksum = 0;
+
+			//single_pkt->ol_flags |= PKT_TX_IPV4 | PKT_TX_IP_CKSUM | PKT_TX_UDP_CKSUM;
+			udphdr = (struct rte_udp_hdr *)(rte_pktmbuf_mtod(single_pkt, unsigned char *) + sizeof(struct rte_ether_hdr) /*+ sizeof(vlan_header_t)*/ + sizeof(struct rte_ipv4_hdr));
+			ori_port_id = rte_cpu_to_be_16(udphdr->dst_port);
+			rte_memcpy(eth_hdr->s_addr.addr_bytes,ppp_ports[user_index].lan_mac,ETH_ALEN);
+			rte_memcpy(eth_hdr->d_addr.addr_bytes,ppp_ports[user_index].addr_table[ori_port_id].mac_addr,ETH_ALEN);
+			ip_hdr->dst_addr = ppp_ports[user_index].addr_table[ori_port_id].src_ip;
+			udphdr->dst_port = ppp_ports[user_index].addr_table[ori_port_id].port_id;
+			ppp_ports[user_index].addr_table[ori_port_id].is_alive = 10;
+
+			udphdr->dgram_cksum = 0;
+			ip_hdr->hdr_checksum = rte_ipv4_cksum(ip_hdr);
+			udphdr->dgram_cksum = rte_ipv4_udptcp_cksum(ip_hdr,udphdr);
+
+			pkt[total_tx++] = single_pkt;
+		}
+		if (likely(total_tx > 0))
+			rte_eth_tx_burst(0,2,pkt,total_tx);
+	}
+	return 0;
 }
 
-STATUS A_this_layer_up(__attribute__((unused)) struct rte_timer *tim, __attribute__((unused)) tPPP_PORT *port_ccb)
+int decapsulation_tcp(void)
 {
-	unsigned char buffer[MSG_BUF];
-    uint16_t mulen;
+	uint64_t 			total_tx;
+	struct rte_ether_hdr 	*eth_hdr;
+	//vlan_header_t		*vlan_header;
+	struct rte_ipv4_hdr 	*ip_hdr;
+	struct rte_tcp_hdr 		*tcphdr;
+	uint16_t 			ori_port_id, burst_size, user_index;
+	struct rte_mbuf 	*pkt[BURST_SIZE], *single_pkt;
+	int 				i;
+	
+	for(i=0; i<BURST_SIZE; i++)
+		pkt[i] = rte_pktmbuf_alloc(mbuf_pool);
 
-	if (port_ccb->ppp_phase[port_ccb->cp].ppp_payload->ppp_protocol == rte_cpu_to_be_16(LCP_PROTOCOL)) {
-    	memset(buffer,0,MSG_BUF);
-    	if (build_auth_request_pap(buffer,port_ccb,&mulen) < 0)
-    		return FALSE;
-    	drv_xmit(buffer,mulen);
-        RTE_LOG(INFO,EAL,"Session 0x%x LCP connection establish successfully.\n", rte_cpu_to_be_16(port_ccb->session_id));
-        RTE_LOG(INFO,EAL,"Session 0x%x starting Authenticate.\n", rte_cpu_to_be_16(port_ccb->session_id));
-        #ifdef _DP_DBG
-    	puts("LCP connection establish successfully.");
-    	puts("Starting Authenticate.");
-        #endif
-    }
-    else if (port_ccb->ppp_phase[port_ccb->cp].ppp_payload->ppp_protocol == rte_cpu_to_be_16(IPCP_PROTOCOL)) {
-    	port_ccb->data_plane_start = TRUE;
-    	port_ccb->phase = DATA_PHASE;
-    	rte_timer_reset(&(port_ccb->nat),rte_get_timer_hz(),PERIODICAL,4,(rte_timer_cb_t)nat_rule_timer,ppp_ports);
-        RTE_LOG(INFO,EAL,"Session 0x%x IPCP connection establish successfully.\n", rte_cpu_to_be_16(port_ccb->session_id));
-        #ifdef _DP_DBG
-    	puts("IPCP connection establish successfully.");
-        #endif
-        RTE_LOG(INFO,EAL,"Now we can start to send data via pppoe session id 0x%x and vlan is 0x%x.\n", rte_cpu_to_be_16(port_ccb->session_id), port_ccb->vlan);
-        RTE_LOG(INFO,EAL,"Our PPPoE client IP address is %" PRIu8 ".%" PRIu8 ".%" PRIu8 ".%" PRIu8 ", PPPoE server IP address is %" PRIu8 ".%" PRIu8 ".%" PRIu8 ".%" PRIu8 "\n", *(((uint8_t *)&(port_ccb->ipv4))), *(((uint8_t *)&(port_ccb->ipv4))+1), *(((uint8_t *)&(port_ccb->ipv4))+2), *(((uint8_t *)&(port_ccb->ipv4))+3), *(((uint8_t *)&(port_ccb->ipv4_gw))), *(((uint8_t *)&(port_ccb->ipv4_gw))+1), *(((uint8_t *)&(port_ccb->ipv4_gw))+2), *(((uint8_t *)&(port_ccb->ipv4_gw))+3));
-    	printf("Now we can start to send data via pppoe session id 0x%x.\n", rte_cpu_to_be_16(port_ccb->session_id));
-    	printf("Our PPPoE client IP address is %" PRIu8 ".%" PRIu8 ".%" PRIu8 ".%" PRIu8 ", PPPoE server IP address is %" PRIu8 ".%" PRIu8 ".%" PRIu8 ".%" PRIu8 "\n", *(((uint8_t *)&(port_ccb->ipv4))), *(((uint8_t *)&(port_ccb->ipv4))+1), *(((uint8_t *)&(port_ccb->ipv4))+2), *(((uint8_t *)&(port_ccb->ipv4))+3), *(((uint8_t *)&(port_ccb->ipv4_gw))), *(((uint8_t *)&(port_ccb->ipv4_gw))+1), *(((uint8_t *)&(port_ccb->ipv4_gw))+2), *(((uint8_t *)&(port_ccb->ipv4_gw))+3));
-        prompt = TRUE;
-    }
+	for(;;) {
+		burst_size = rte_ring_dequeue_burst(decap_tcp,(void **)pkt,BURST_SIZE,NULL);
+		if (unlikely(burst_size == 0))
+			continue;
+		total_tx = 0;
+		for(i=0; i<burst_size; i++) {
+			single_pkt = pkt[i];
+			rte_prefetch0(rte_pktmbuf_mtod(single_pkt,void *));
+			eth_hdr = rte_pktmbuf_mtod(single_pkt,struct rte_ether_hdr*);
+			//vlan_header = (vlan_header_t *)(eth_hdr + 1);
+			user_index = 0;//(rte_be_to_cpu_16(vlan_header->tci_union.tci_value) & 0xFFF) - 2;
+			/* for NAT mapping */
+			ip_hdr = (struct rte_ipv4_hdr *)(rte_pktmbuf_mtod(single_pkt,unsigned char *) + sizeof(struct rte_ether_hdr) /*+ sizeof(vlan_header_t)*/);
+			ip_hdr->hdr_checksum = 0;
 
-    return TRUE;
+			//single_pkt->ol_flags |= PKT_TX_IPV4 | PKT_TX_IP_CKSUM | PKT_TX_TCP_CKSUM;
+			tcphdr = (struct rte_tcp_hdr *)(rte_pktmbuf_mtod(single_pkt, unsigned char *) + sizeof(struct rte_ether_hdr) /*+ sizeof(vlan_header_t)*/ + sizeof(struct rte_ipv4_hdr));
+			ori_port_id = rte_cpu_to_be_16(tcphdr->dst_port);
+			rte_memcpy(eth_hdr->s_addr.addr_bytes, ppp_ports[user_index].lan_mac, ETH_ALEN);
+			rte_memcpy(eth_hdr->d_addr.addr_bytes, ppp_ports[user_index].addr_table[ori_port_id].mac_addr, ETH_ALEN);
+			ip_hdr->dst_addr = ppp_ports[user_index].addr_table[ori_port_id].src_ip;
+			tcphdr->dst_port = ppp_ports[user_index].addr_table[ori_port_id].port_id;
+			ppp_ports[user_index].addr_table[ori_port_id].is_alive = 10;
+			ip_hdr->hdr_checksum = rte_ipv4_cksum(ip_hdr);
+			tcphdr->cksum = 0;
+			tcphdr->cksum = rte_ipv4_udptcp_cksum(ip_hdr,tcphdr);
+
+			pkt[total_tx++] = single_pkt;
+		}
+		if (likely(total_tx > 0))
+			rte_eth_tx_burst(0,3,pkt,total_tx);
+	}
+	return 0;
 }
 
-/***********************************************************************
- * A_this_layer_down
- *
- * purpose : To notify upper layer this layer is leaving OPEN state.
- * input   : ppp - timer
- *			 port_ccb - user connection info.
- *           event -
- * return  : error status
- ***********************************************************************/
-STATUS A_this_layer_down(__attribute__((unused)) struct rte_timer *tim, __attribute__((unused)) tPPP_PORT *port_ccb)
+int control_plane_dequeue(tPPP_MBX **mail)
 {
-    if (port_ccb->cp == 1) {
-        #ifdef _DP_DBG
-        printf("IPCP layer is down\n");
-        #endif
-        PPP_FSM(tim,port_ccb,E_CLOSE);
-        port_ccb->data_plane_start = FALSE;
-    }
-    else if (port_ccb->cp == 0) {
-        PPP_FSM(tim,port_ccb,E_CLOSE);
-        #ifdef _DP_DBG
-        printf("LCP layer is down\n");
-        #endif
-    }
+	uint16_t burst_size;
 
-    return TRUE;
+	for(;;) {
+		burst_size = rte_ring_dequeue_burst(rte_ring,(void **)mail,BURST_SIZE,NULL);
+		if (likely(burst_size == 0))
+			continue;
+		break;
+		}
+	return burst_size;
 }
 
-STATUS A_init_restart_count(__attribute__((unused)) struct rte_timer *tim, __attribute__((unused)) tPPP_PORT *port_ccb)
+int encapsulation_udp(void)
 {
-    #ifdef _DP_DBG
-    printf("init restart count\n");
-    #endif
+	struct rte_udp_hdr 		*udphdr;
+	char 				*cur;
+	uint32_t 			new_port_id;
+	pppoe_header_t 		*pppoe_header;
+	struct rte_mbuf 	*pkt[BURST_SIZE], *single_pkt;
+	uint64_t 			total_tx;
+	uint16_t			burst_size, user_index;
+	struct rte_ether_hdr 	*eth_hdr;
+	//vlan_header_t		*vlan_header;
+	struct rte_ipv4_hdr 	*ip_hdr;
+	int 				i;
 
-    return TRUE;
+	for(i=0; i<BURST_SIZE; i++)
+		pkt[i] = rte_pktmbuf_alloc(mbuf_pool);
+
+	for(;;) {
+		burst_size = rte_ring_dequeue_burst(encap_udp,(void **)pkt,BURST_SIZE,NULL);
+		if (unlikely(burst_size == 0))
+			continue;
+		total_tx = 0;
+		for(i=0; i<burst_size; i++) {
+			single_pkt = pkt[i];
+			rte_prefetch0(rte_pktmbuf_mtod(single_pkt,void *));
+			eth_hdr = rte_pktmbuf_mtod(single_pkt,struct rte_ether_hdr*);
+			//vlan_header = (vlan_header_t *)(eth_hdr + 1);
+			user_index = 0;//(rte_be_to_cpu_16(vlan_header->tci_union.tci_value) & 0xFFF) - 2;
+			ip_hdr = (struct rte_ipv4_hdr *)(rte_pktmbuf_mtod(single_pkt,unsigned char *) + sizeof(struct rte_ether_hdr) /*+ sizeof(vlan_header_t)*/);
+			ip_hdr->hdr_checksum = 0;
+			
+			/* for nat */
+			//single_pkt->ol_flags |= PKT_TX_IPV4 | PKT_TX_IP_CKSUM | PKT_TX_UDP_CKSUM;
+
+			udphdr = (struct rte_udp_hdr *)(rte_pktmbuf_mtod(single_pkt, unsigned char *) + sizeof(struct rte_ether_hdr) /*+ sizeof(vlan_header_t)*/ + sizeof(struct rte_ipv4_hdr));
+			nat_udp_learning(eth_hdr,ip_hdr,udphdr,&new_port_id,ppp_ports[user_index].addr_table);
+			ip_hdr->src_addr = ppp_ports[user_index].ipv4;
+			udphdr->src_port = rte_cpu_to_be_16(new_port_id);
+			ppp_ports[user_index].addr_table[new_port_id].is_alive = 10;
+			ip_hdr->hdr_checksum = rte_ipv4_cksum(ip_hdr);
+			udphdr->dgram_cksum = 0;
+			udphdr->dgram_cksum = rte_ipv4_udptcp_cksum(ip_hdr,udphdr);
+
+			/* for PPPoE */
+			rte_memcpy(eth_hdr->s_addr.addr_bytes,ppp_ports[user_index].src_mac,ETH_ALEN);
+			rte_memcpy(eth_hdr->d_addr.addr_bytes,ppp_ports[user_index].dst_mac,ETH_ALEN);
+
+			/*vlan_header->next_proto*/eth_hdr->ether_type = rte_cpu_to_be_16(ETH_P_PPP_SES);
+			cur = (char *)eth_hdr - 8;
+			rte_memcpy(cur,eth_hdr,sizeof(struct rte_ether_hdr));
+			//rte_memcpy(cur+sizeof(struct rte_ether_hdr),vlan_header,sizeof(vlan_header_t));
+			pppoe_header = (pppoe_header_t *)(cur+sizeof(struct rte_ether_hdr)/*+sizeof(vlan_header_t)*/);
+			pppoe_header->ver_type = 0x11;
+			pppoe_header->code = 0;
+			pppoe_header->session_id = ppp_ports[user_index].session_id;
+			pppoe_header->length = rte_cpu_to_be_16((single_pkt->pkt_len) - 14 + 2);
+			*((uint16_t *)(cur+sizeof(struct rte_ether_hdr)+/*sizeof(vlan_header_t)+*/sizeof(pppoe_header_t))) = rte_cpu_to_be_16(IP_PROTOCOL);
+			single_pkt->data_off -= 8;
+			single_pkt->pkt_len += 8;
+			single_pkt->data_len += 8;
+
+			pkt[total_tx++] = single_pkt;
+		}
+		if (likely(total_tx > 0))
+			rte_eth_tx_burst(1,2,pkt,total_tx);
+	}
+	return 0;
 }
 
-STATUS A_init_restart_config(__attribute__((unused)) struct rte_timer *tim, __attribute__((unused)) tPPP_PORT *port_ccb)
+int encapsulation_tcp(void)
 {
-    RTE_LOG(INFO,EAL,"Session 0x%x init config req timer start.\n", rte_cpu_to_be_16(port_ccb->session_id));
-    #ifdef _DP_DBG
-    printf("init config req timer start\n");
-    #endif
-    rte_timer_stop(tim);
-    port_ccb->ppp_phase[port_ccb->cp].timer_counter = 9;
-	rte_timer_reset(tim,3*rte_get_timer_hz(),PERIODICAL,4,(rte_timer_cb_t)A_send_config_request,port_ccb);
+	struct rte_tcp_hdr 		*tcphdr;
+	char 				*cur;
+	uint32_t 			new_port_id;
+	pppoe_header_t 		*pppoe_header;
+	struct rte_mbuf 	*pkt[BURST_SIZE], *single_pkt;
+	uint64_t 			total_tx;
+	uint16_t			burst_size, user_index;
+	struct rte_ether_hdr 	*eth_hdr;
+	//vlan_header_t		*vlan_header;
+	struct rte_ipv4_hdr 	*ip_hdr;
+	int 				i;
+	
+	for(i=0; i<BURST_SIZE; i++)
+		pkt[i] = rte_pktmbuf_alloc(mbuf_pool);
 
-    return TRUE;
+	for(;;) {
+		burst_size = rte_ring_dequeue_burst(encap_tcp,(void **)pkt,BURST_SIZE,NULL);
+		if (unlikely(burst_size == 0))
+			continue;
+		total_tx = 0;
+		for(i=0; i<burst_size; i++) {
+			single_pkt = pkt[i];
+			rte_prefetch0(rte_pktmbuf_mtod(single_pkt,void *));
+			eth_hdr = rte_pktmbuf_mtod(single_pkt,struct rte_ether_hdr*);
+			//vlan_header = (vlan_header_t *)(eth_hdr + 1);
+			user_index = 0;//(rte_be_to_cpu_16(vlan_header->tci_union.tci_value) & 0xFFF) - 2;
+			ip_hdr = (struct rte_ipv4_hdr *)(rte_pktmbuf_mtod(single_pkt,unsigned char *) + sizeof(struct rte_ether_hdr) /*+ sizeof(vlan_header_t)*/);
+			ip_hdr->hdr_checksum = 0;
+			/* for nat */
+			//single_pkt->ol_flags |= PKT_TX_IPV4 | PKT_TX_IP_CKSUM | PKT_TX_TCP_CKSUM;
+
+			tcphdr = (struct rte_tcp_hdr *)(rte_pktmbuf_mtod(single_pkt, unsigned char *) + sizeof(struct rte_ether_hdr) /*+ sizeof(vlan_header_t)*/ + sizeof(struct rte_ipv4_hdr));
+			nat_tcp_learning(eth_hdr,ip_hdr,tcphdr,&new_port_id,ppp_ports[user_index].addr_table);
+			ip_hdr->src_addr = ppp_ports[user_index].ipv4;
+			tcphdr->src_port = rte_cpu_to_be_16(new_port_id);
+			ppp_ports[user_index].addr_table[new_port_id].is_alive = 10;
+			ip_hdr->hdr_checksum = rte_ipv4_cksum(ip_hdr);
+			tcphdr->cksum = 0;
+			tcphdr->cksum = rte_ipv4_udptcp_cksum(ip_hdr,tcphdr);
+
+			/* for PPPoE */
+			rte_memcpy(eth_hdr->s_addr.addr_bytes,ppp_ports[user_index].src_mac,ETH_ALEN);
+			rte_memcpy(eth_hdr->d_addr.addr_bytes,ppp_ports[user_index].dst_mac,ETH_ALEN);
+
+			/*vlan_header->next_proto*/eth_hdr->ether_type = rte_cpu_to_be_16(ETH_P_PPP_SES);
+			cur = (char *)eth_hdr - 8;
+			rte_memcpy(cur,eth_hdr,sizeof(struct rte_ether_hdr));
+			//rte_memcpy(cur+sizeof(struct rte_ether_hdr),vlan_header,sizeof(vlan_header_t));
+			pppoe_header = (pppoe_header_t *)(cur+sizeof(struct rte_ether_hdr)/*+sizeof(vlan_header_t)*/);
+			pppoe_header->ver_type = 0x11;
+			pppoe_header->code = 0;
+			pppoe_header->session_id = ppp_ports[user_index].session_id;
+			pppoe_header->length = rte_cpu_to_be_16((single_pkt->pkt_len) - 14 + 2);
+			*((uint16_t *)(cur+sizeof(struct rte_ether_hdr)/*+sizeof(vlan_header_t)*/+sizeof(pppoe_header_t))) = rte_cpu_to_be_16(IP_PROTOCOL);
+			single_pkt->data_off -= 8;
+			single_pkt->pkt_len += 8;
+			single_pkt->data_len += 8;
+
+			pkt[total_tx++] = single_pkt;
+		}
+		if (likely(total_tx > 0))
+			rte_eth_tx_burst(1,3,pkt,total_tx);
+	}
+	return 0;
 }
 
-STATUS A_init_restart_termin(__attribute__((unused)) struct rte_timer *tim, __attribute__((unused)) tPPP_PORT *port_ccb)
+int gateway(void)
 {
-    RTE_LOG(INFO,EAL,"Session 0x%x init termin req timer start.\n", rte_cpu_to_be_16(port_ccb->session_id));
-    #ifdef _DP_DBG
-    printf("init termin req timer start\n");
-    #endif
-    rte_timer_stop(tim);
-    port_ccb->ppp_phase[port_ccb->cp].timer_counter = 9;
-	rte_timer_reset(tim,3*rte_get_timer_hz(),PERIODICAL,4,(rte_timer_cb_t)A_send_terminate_request,port_ccb);
+	struct rte_mbuf 	*single_pkt;
+	uint64_t 			total_tx;
+	struct rte_ether_hdr 	*eth_hdr;
+	//vlan_header_t		*vlan_header;
+	struct rte_ipv4_hdr 	*ip_hdr;
+	struct rte_icmp_hdr 	*icmphdr;
+	struct rte_mbuf 	*pkt[BURST_SIZE];
+	unsigned char 		mac_addr[6];
+	struct rte_arp_hdr		*arphdr;
+	char 				*cur;
+	int 				i;
+	pppoe_header_t 		*pppoe_header;
+	uint16_t 			nb_tx, nb_rx, user_index;
+	uint32_t			lan_ip = rte_cpu_to_be_32(0xc0a80201); //192.168.2.1
 
-    return TRUE;
+	usleep(500000);
+	rte_eth_macaddr_get(0,(struct rte_ether_addr *)mac_addr);
+	for(;;) {
+		nb_rx = rte_eth_rx_burst(0,0,pkt,BURST_SIZE);
+		if (nb_rx == 0)
+			continue;
+		total_tx = 0;
+		for(i=0; i<nb_rx; i++) {
+			single_pkt = pkt[i];
+			rte_prefetch0(rte_pktmbuf_mtod(single_pkt,void *));
+			eth_hdr = rte_pktmbuf_mtod(single_pkt,struct rte_ether_hdr*);
+			/*if (unlikely(eth_hdr->ether_type != rte_cpu_to_be_16(VLAN))) {
+				rte_pktmbuf_free(single_pkt);
+				continue;
+			}*/
+			rte_rmb();
+			//vlan_header = (vlan_header_t *)(eth_hdr + 1);
+			/* translate from vlan id to user index, we mention vlan_id - 2 = user_id */
+			user_index = 0;//(rte_be_to_cpu_16(vlan_header->tci_union.tci_value) & 0xFFF) - 2;
+			/*if (unlikely(user_index > MAX_USER)) {
+				rte_pktmbuf_free(single_pkt);
+				continue;
+			}*/
+
+			if (unlikely(/*vlan_header->next_proto*/eth_hdr->ether_type == rte_cpu_to_be_16(FRAME_TYPE_ARP))) { 
+				/* We only reply arp request to us */
+				arphdr = (struct rte_arp_hdr *)(rte_pktmbuf_mtod(single_pkt, unsigned char *) + sizeof(struct rte_ether_hdr)/* + sizeof(vlan_header_t)*/);
+				if (arphdr->arp_opcode == rte_cpu_to_be_16(RTE_ARP_OP_REQUEST) && arphdr->arp_data.arp_tip == lan_ip) {
+					rte_memcpy(eth_hdr->d_addr.addr_bytes,eth_hdr->s_addr.addr_bytes,ETH_ALEN);
+					rte_memcpy(eth_hdr->s_addr.addr_bytes,mac_addr,ETH_ALEN);
+					rte_memcpy(arphdr->arp_data.arp_tha.addr_bytes,arphdr->arp_data.arp_sha.addr_bytes,ETH_ALEN);
+					rte_memcpy(arphdr->arp_data.arp_sha.addr_bytes,mac_addr,ETH_ALEN);
+					arphdr->arp_data.arp_tip = arphdr->arp_data.arp_sip;
+					arphdr->arp_data.arp_sip = lan_ip;
+					arphdr->arp_opcode = rte_cpu_to_be_16(RTE_ARP_OP_REPLY);
+					rte_eth_tx_burst(0,0,&single_pkt,1);
+					continue;
+				}
+				rte_pktmbuf_free(single_pkt);
+				continue;
+			}
+			else if (unlikely(/*vlan_header->next_proto*/eth_hdr->ether_type == rte_cpu_to_be_16(ETH_P_PPP_DIS) || (/*vlan_header->next_proto*/eth_hdr->ether_type == rte_cpu_to_be_16(ETH_P_PPP_SES)))) {
+				rte_pktmbuf_free(single_pkt);
+				continue;
+			}
+			else if (likely(/*vlan_header->next_proto*/eth_hdr->ether_type == rte_cpu_to_be_16(FRAME_TYPE_IP))) {
+				ip_hdr = (struct rte_ipv4_hdr *)(rte_pktmbuf_mtod(single_pkt, unsigned char *) + sizeof(struct rte_ether_hdr)/* + sizeof(vlan_header_t)*/);
+				if (unlikely((ip_hdr->src_addr) << 8 != lan_ip << 8)) {
+					rte_pktmbuf_free(single_pkt);
+					continue;
+				}
+				single_pkt->l2_len = sizeof(struct rte_ether_hdr)/* + sizeof(vlan_header_t)*/ + sizeof(pppoe_header_t) + sizeof(ppp_payload_t);
+				single_pkt->l3_len = sizeof(struct rte_ipv4_hdr);
+				
+				if (ip_hdr->next_proto_id == PROTO_TYPE_ICMP) {
+					//single_pkt->ol_flags |= PKT_TX_IPV4 | PKT_TX_IP_CKSUM;
+					icmphdr = (struct rte_icmp_hdr *)(rte_pktmbuf_mtod(single_pkt, unsigned char *) + sizeof(struct rte_ether_hdr)/* + sizeof(vlan_header_t)*/ + sizeof(struct rte_ipv4_hdr));
+					if (ip_hdr->dst_addr != lan_ip) {
+						if (unlikely(ppp_ports[user_index].data_plane_start == FALSE)) {
+							rte_pktmbuf_free(single_pkt);
+							continue;
+						}
+						uint32_t 			new_port_id;
+						uint32_t			icmp_new_cksum;
+
+						nat_icmp_learning(eth_hdr,ip_hdr,icmphdr,&new_port_id,ppp_ports[user_index].addr_table);
+						ip_hdr->src_addr = ppp_ports[user_index].ipv4;
+						icmphdr->icmp_ident = rte_cpu_to_be_16(new_port_id);
+						ppp_ports[user_index].addr_table[new_port_id].is_alive = 10;
+						ip_hdr->hdr_checksum = 0;
+						ip_hdr->hdr_checksum = rte_ipv4_cksum(ip_hdr);
+
+						if (((icmp_new_cksum = icmphdr->icmp_cksum + ppp_ports[user_index].addr_table[new_port_id].port_id - rte_cpu_to_be_16(new_port_id)) >> 16) != 0)
+							icmp_new_cksum = (icmp_new_cksum & 0xFFFF) + (icmp_new_cksum >> 16);
+						icmphdr->icmp_cksum = (uint16_t)icmp_new_cksum;
+						
+						rte_memcpy(eth_hdr->s_addr.addr_bytes,ppp_ports[user_index].src_mac,ETH_ALEN);
+						rte_memcpy(eth_hdr->d_addr.addr_bytes,ppp_ports[user_index].dst_mac,ETH_ALEN);
+
+						/*vlan_header->next_proto*/eth_hdr->ether_type = rte_cpu_to_be_16(ETH_P_PPP_SES);
+						cur = (char *)eth_hdr - 8;
+						rte_memcpy(cur,eth_hdr,sizeof(struct rte_ether_hdr));
+						//rte_memcpy(cur+sizeof(struct rte_ether_hdr),vlan_header,sizeof(vlan_header_t));
+						pppoe_header = (pppoe_header_t *)(cur+sizeof(struct rte_ether_hdr)/*+sizeof(vlan_header_t)*/);
+						pppoe_header->ver_type = 0x11;
+						pppoe_header->code = 0;
+						pppoe_header->session_id = ppp_ports[user_index].session_id;
+						pppoe_header->length = rte_cpu_to_be_16((single_pkt->pkt_len) - 14 + 2);
+						*((uint16_t *)(cur+sizeof(struct rte_ether_hdr)/*+sizeof(vlan_header_t)*/+sizeof(pppoe_header_t))) = rte_cpu_to_be_16(IP_PROTOCOL);
+						single_pkt->data_off -= 8;
+						single_pkt->pkt_len += 8;
+						single_pkt->data_len += 8;
+						
+						pkt[total_tx++] = single_pkt;
+						#ifdef _DP_DBG
+						puts("nat icmp at port 0");
+						#endif
+					}
+					else {
+						memcpy(eth_hdr->d_addr.addr_bytes,eth_hdr->s_addr.addr_bytes,ETH_ALEN);
+						memcpy(eth_hdr->s_addr.addr_bytes,mac_addr,ETH_ALEN);
+						ip_hdr->dst_addr = ip_hdr->src_addr;
+						ip_hdr->src_addr = lan_ip;
+						icmphdr->icmp_type = 0;
+						uint32_t cksum = ~icmphdr->icmp_cksum & 0xffff;
+						cksum += ~rte_cpu_to_be_16(8 << 8) & 0xffff;
+						cksum += rte_cpu_to_be_16(0 << 8);
+		  				cksum = (cksum & 0xffff) + (cksum >> 16);
+						cksum = (cksum & 0xffff) + (cksum >> 16);
+						icmphdr->icmp_cksum = ~cksum;
+						rte_eth_tx_burst(0,0,&single_pkt,1);
+						continue;
+					}
+				}
+				else if (ip_hdr->next_proto_id == PROTO_TYPE_TCP) {
+					if (unlikely(ppp_ports[user_index].data_plane_start == FALSE)) {
+						rte_pktmbuf_free(single_pkt);
+						continue;
+					}
+					rte_ring_enqueue_burst(encap_tcp,(void **)&single_pkt,1,NULL);
+				}
+				else if (ip_hdr->next_proto_id == PROTO_TYPE_UDP) {
+					if (unlikely(ppp_ports[user_index].data_plane_start == FALSE)) {
+						rte_pktmbuf_free(single_pkt);
+						continue;
+					}
+					rte_ring_enqueue_burst(encap_udp,(void **)&single_pkt,1,NULL);
+				}
+				else {
+					#ifdef _DP_DBG
+					puts("unknown L4 packet recv on gateway LAN port queue");
+					printf("protocol = %x\n", ip_hdr->next_proto_id);
+					#endif
+					rte_pktmbuf_free(single_pkt);
+				}
+			}
+			else {
+				#ifdef _DP_DBG
+				puts("unknown ether type recv on gateway LAN port queue");
+				printf("ether type = %x\n", rte_be_to_cpu_16(eth_hdr->ether_type));
+				#endif
+				rte_pktmbuf_free(single_pkt);
+				continue;
+			}
+		}
+		if (likely(total_tx > 0)) {
+			nb_tx = rte_eth_tx_burst(1,0,pkt,total_tx);
+			if (unlikely(nb_tx < total_tx)) {
+				for(uint16_t buf=nb_tx; buf<total_tx; buf++)
+					rte_pktmbuf_free(pkt[buf]);
+			}
+		}
+	}
+	return 0;
 }
 
-STATUS A_send_config_request(__attribute__((unused)) struct rte_timer *tim, __attribute__((unused)) tPPP_PORT *port_ccb)
+void drv_xmit(U8 *mu, U16 mulen)
 {
-    unsigned char buffer[MSG_BUF];
-    uint16_t mulen;
+	struct rte_mbuf *pkt;
+	char 			*buf;
 
-    if (port_ccb->ppp_phase[port_ccb->cp].timer_counter == 0) {
-    	rte_timer_stop(tim);
-        RTE_LOG(INFO,EAL,"Session 0x%x config request timeout.\n", rte_cpu_to_be_16(port_ccb->session_id));
-        #ifdef _DP_DBG
-    	puts("config request timeout.");
-        #endif
-    	PPP_FSM(tim,port_ccb,E_TIMEOUT_COUNTER_EXPIRED);
-    }
-    if (build_config_request(buffer,port_ccb,&mulen) < 0)
-        return FALSE;
-    drv_xmit(buffer,mulen);
-    port_ccb->ppp_phase[port_ccb->cp].timer_counter--;
-    
-    return TRUE;
+	pkt = rte_pktmbuf_alloc(mbuf_pool);
+	buf = rte_pktmbuf_mtod(pkt,char *);
+	rte_memcpy(buf,mu,mulen);
+	pkt->data_len = mulen;
+	pkt->pkt_len = mulen;
+	rte_eth_tx_burst(1,1,&pkt,1);
 }
 
-STATUS A_send_config_nak_rej(__attribute__((unused)) struct rte_timer *tim, __attribute__((unused)) tPPP_PORT *port_ccb)
+static int lsi_event_callback(uint16_t port_id, enum rte_eth_event_type type, void *param)
 {
-    unsigned char buffer[MSG_BUF];
-    uint16_t mulen;
+	struct rte_eth_link link;
+	tPPP_MBX			*mail = (tPPP_MBX *)rte_malloc(NULL,sizeof(tPPP_MBX),2048);
 
-    if (build_config_nak_rej(buffer,port_ccb,&mulen) < 0)
-        return FALSE;
-    drv_xmit(buffer,mulen);
+	RTE_SET_USED(param);
 
-    return TRUE;
-}
+	printf("\n\nIn registered callback...\n");
+	printf("Event type: %s\n", type == RTE_ETH_EVENT_INTR_LSC ? "LSC interrupt" : "unknown event");
+	rte_eth_link_get_nowait(port_id, &link);
+	if (link.link_status) {
+		printf("Port %d Link Up - speed %u Mbps - %s\n\n",
+				port_id, (unsigned)link.link_speed,
+			(link.link_duplex == ETH_LINK_FULL_DUPLEX) ?
+				("full-duplex") : ("half-duplex"));
+		mail->refp[0] = LINK_UP;
+		mail->type = IPC_EV_TYPE_REG;
+		mail->len = 1;
+		//enqueue up event to main thread
+		rte_ring_enqueue_burst(rte_ring,(void **)&mail,1,NULL);
+	} 
+	else {
+		printf("Port %d Link Down\n\n", port_id);
+		mail->refp[0] = LINK_DOWN;
+		mail->type = IPC_EV_TYPE_REG;
+		mail->len = 1;
+		//enqueue down event to main thread
+		rte_ring_enqueue_burst(rte_ring,(void **)&mail,1,NULL);
+	}
 
-STATUS A_send_config_ack(__attribute__((unused)) struct rte_timer *tim, __attribute__((unused)) tPPP_PORT *port_ccb)
-{
-    unsigned char buffer[MSG_BUF];
-    uint16_t mulen;
-
-    if (build_config_ack(buffer,port_ccb,&mulen) < 0)
-        return FALSE;
-    drv_xmit(buffer,mulen);
-
-    return TRUE;
-}
-
-STATUS A_send_terminate_request(__attribute__((unused)) struct rte_timer *tim, __attribute__((unused)) tPPP_PORT *port_ccb)
-{
-    unsigned char buffer[MSG_BUF];
-    uint16_t mulen;
-
-    if (port_ccb->ppp_phase[port_ccb->cp].timer_counter == 0) {
-    	rte_timer_stop(tim);
-        RTE_LOG(INFO,EAL,"Session 0x%x terminate request timeout.\n", rte_cpu_to_be_16(port_ccb->session_id));
-        #ifdef _DP_DBG
-    	puts("termin request timeout.");
-        #endif
-    	PPP_FSM(tim,port_ccb,E_TIMEOUT_COUNTER_EXPIRED);
-    }
-    if (build_terminate_request(buffer,port_ccb,&mulen) < 0)
-        return FALSE;
-    drv_xmit(buffer,mulen);
-    port_ccb->ppp_phase[port_ccb->cp].timer_counter--;
-    
-    return TRUE;
-}
-
-STATUS A_send_terminate_ack(__attribute__((unused)) struct rte_timer *tim, __attribute__((unused)) tPPP_PORT *port_ccb)
-{
-    unsigned char buffer[MSG_BUF];
-    uint16_t mulen;
-
-    if (build_terminate_ack(buffer,port_ccb,&mulen) < 0)
-        return FALSE;
-    drv_xmit(buffer,mulen);
-
-    return TRUE;
-}
-
-STATUS A_send_code_reject(__attribute__((unused)) struct rte_timer *tim, __attribute__((unused)) tPPP_PORT *port_ccb)
-{
-    unsigned char buffer[MSG_BUF];
-    uint16_t mulen;
-
-    if (build_code_reject(buffer,port_ccb,&mulen) < 0)
-        return FALSE;
-    drv_xmit(buffer,mulen);
-
-    return TRUE;
-}
-
-STATUS A_send_echo_reply(__attribute__((unused)) struct rte_timer *tim, __attribute__((unused)) tPPP_PORT *port_ccb)
-{
-    unsigned char buffer[MSG_BUF];
-    uint16_t mulen;
-
-    if (build_echo_reply(buffer,port_ccb,&mulen) < 0)
-        return FALSE;
-    drv_xmit(buffer,mulen);
-
-    return TRUE;
-}
-
-STATUS A_create_up_event(__attribute__((unused)) struct rte_timer *tim, __attribute__((unused)) tPPP_PORT *port_ccb)
-{
-    #ifdef _DP_DBG
-    printf("create up event\n");
-    #endif 
-
-    return TRUE;
-}
-
-STATUS A_create_down_event(__attribute__((unused)) struct rte_timer *tim, __attribute__((unused)) tPPP_PORT *port_ccb)
-{
-    #ifdef _DP_DBG
-    printf("create down event\n");
-    #endif
-
-    PPP_FSM(tim,port_ccb,E_DOWN);
-
-    return TRUE;
-}
-
-STATUS A_zero_restart_count(__attribute__((unused)) struct rte_timer *tim, __attribute__((unused)) tPPP_PORT *port_ccb)
-{
-    #ifdef _DP_DBG
-    printf("zero restart count\n");
-    #endif
-    
-    return TRUE;
-}
-
-STATUS A_send_padt(__attribute__((unused)) struct rte_timer *tim, __attribute__((unused)) tPPP_PORT *port_ccb)
-{
-    if (build_padt(port_ccb) < 0)
-        return FALSE;
-    port_ccb->phase--;
-
-    return TRUE;
-}
-
-STATUS A_create_close_to_lower_layer(__attribute__((unused)) struct rte_timer *tim, __attribute__((unused)) tPPP_PORT *port_ccb)
-{
-    RTE_LOG(INFO,EAL,"Session 0x%x notify lower layer to close connection.\n", rte_cpu_to_be_16(port_ccb->session_id));
-    #ifdef _DP_DBG
-    puts("Notify lower layer to close connection.");
-    #endif
-    port_ccb->cp = 0;
-    port_ccb->phase--;
-    PPP_FSM(tim,port_ccb,E_CLOSE);
-
-    return TRUE;
+	return 0;
 }
